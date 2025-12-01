@@ -1,0 +1,511 @@
+//@version=5
+indicator("IFVG 2.0 - Inversion Fair Value Gaps [Mejorado]", "IFVG 2.0", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 📘 EXPLICACIÓN FÁCIL - ¿QUÉ ES ESTO?
+//═════════════════════════════════════════════════════════════════════════════
+/*
+IFVG = Inversion Fair Value Gaps (Huecos de Valor Justo con Inversión)
+
+¿Qué hace este indicador?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. DETECTA "Fair Value Gaps" (FVG) - Huecos en el precio donde NO hubo negociación
+   
+   Ejemplo FVG Alcista:
+   │      ┌─── Vela 3 (actual)
+   │      │    
+   │    ┌─┴─┐
+   │    │   │
+   │    └───┘
+   │      ↑
+   │      │ [HUECO/GAP] ← Zona sin negociación (FVG)
+   │      ↓
+   │  ┌─────┐
+   │  │     │  Vela 1
+   │  └─────┘
+   
+   Entre el high de Vela 1 y el low de Vela 3 hay un HUECO = Fair Value Gap
+
+2. ESPERA LA "INVERSIÓN" del FVG
+   - FVG Alcista se invierte cuando el precio CAE y toca el hueco
+   - FVG Bajista se invierte cuando el precio SUBE y toca el hueco
+   
+3. GENERA SEÑALES cuando el precio rebota desde la zona de inversión
+   - ▲ Señal alcista = Precio tocó FVG invertido y rebotó hacia arriba
+   - ▼ Señal bajista = Precio tocó FVG invertido y rebotó hacia abajo
+
+¿Por qué funciona?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- El mercado tiende a LLENAR los huecos (volver al precio justo)
+- Estos huecos actúan como zonas de soporte/resistencia
+- Cuando se invierten, el precio tiende a rebotar desde ahí
+*/
+
+//═════════════════════════════════════════════════════════════════════════════
+// ⚙️ CONFIGURACIÓN PRINCIPAL
+//═════════════════════════════════════════════════════════════════════════════
+
+grupo_deteccion = "🔍 Detección de FVG"
+
+disp_num = input.int(10, 
+     title = "Cantidad a Mostrar", 
+     minval = 1, 
+     maxval = 100, 
+     group = grupo_deteccion,
+     tooltip = "Número de FVGs invertidos (pares alcista/bajista) a mostrar en el gráfico.\n\n" +
+               "• Mayor valor = Más zonas históricas visibles\n" +
+               "• Menor valor = Solo las más recientes\n\n" +
+               "Recomendado: 5-10 para gráficos limpios, 20-50 para análisis profundo")
+
+signal_pref = input.string("Close", 
+     title = "Preferencia de Señal", 
+     options = ["Close","Wick"], 
+     group = grupo_deteccion,
+     tooltip = "Define QUÉ precio debe tocar el FVG para generar señal:\n\n" +
+               "• Close (Cierre) = La vela debe CERRAR en la zona FVG (más conservador)\n" +
+               "• Wick (Mecha) = Basta que la mecha TOQUE la zona FVG (más sensible)\n\n" +
+               "Close = menos señales pero más confiables\n" +
+               "Wick = más señales pero pueden ser falsas")
+
+wt = signal_pref == "Wick"
+
+atr_multi = input.float(0.5, 
+     title = "Multiplicador ATR (Filtro)", 
+     minval = 0,
+     step = 0.1,
+     group = grupo_deteccion,
+     tooltip = "Filtra FVGs pequeños usando volatilidad (ATR).\n\n" +
+               "Solo muestra FVGs cuyo tamaño sea > (ATR × Multiplicador)\n\n" +
+               "• 0 = Muestra TODOS los FVGs (incluso muy pequeños)\n" +
+               "• 0.25 = Filtro suave (muchos FVGs)\n" +
+               "• 0.5 = Filtro medio (recomendado)\n" +
+               "• 1.0+ = Filtro estricto (solo FVGs grandes)\n\n" +
+               "Mayor valor = Solo FVGs significativos (menos ruido)")
+
+atr_length = input.int(300,
+     title = "Longitud ATR",
+     minval = 10,
+     maxval = 500,
+     group = grupo_deteccion,
+     tooltip = "Período para calcular el ATR (Average True Range).\n\n" +
+               "• Menor (50-100) = ATR más reactivo a volatilidad reciente\n" +
+               "• Mayor (200-300) = ATR más suave, promedio de largo plazo\n\n" +
+               "Valor por defecto: 200 (estándar para FVGs)")
+
+//─────────────────────────────────────────────────────────────────────────────
+grupo_memoria = "💾 Gestión de Memoria"
+
+buffer_size = input.int(100, 
+     title = "Tamaño del Buffer (Memoria)",
+     minval = 20,
+     maxval = 500,
+     step = 10,
+     group = grupo_memoria,
+     tooltip = "Número MÁXIMO de FVGs que se guardan en memoria.\n\n" +
+               "¿Qué hace?\n" +
+               "• Almacena los últimos N FVGs detectados\n" +
+               "• Cuando se llena, elimina el más antiguo (FIFO)\n\n" +
+               "¿Por qué es importante?\n" +
+               "• Más memoria = Más datos históricos, pero más lento\n" +
+               "• Menos memoria = Más rápido, pero pierde historial\n\n" +
+               "Recomendado:\n" +
+               "• Scalping/Daytrading: 50-100\n" +
+               "• Swing Trading: 100-200\n" +
+               "• Análisis largo plazo: 200-500\n\n" +
+               "⚠️ Valores muy altos pueden hacer el script más lento")
+
+max_extension = input.int(50,
+     title = "Extensión Máxima (Barras)",
+     minval = 10,
+     maxval = 200,
+     step = 5,
+     group = grupo_memoria,
+     tooltip = "Número de barras hacia la DERECHA que se extiende el FVG.\n\n" +
+               "• Afecta cuánto tiempo permanece visible la zona en el futuro\n" +
+               "• Mayor valor = Zona se extiende más hacia adelante\n\n" +
+               "Útil para:\n" +
+               "• Ver zonas clave en el futuro\n" +
+               "• Anticipar donde puede reaccionar el precio\n\n" +
+               "Recomendado: 30-50 barras")
+
+//─────────────────────────────────────────────────────────────────────────────
+grupo_colores = "🎨 Colores y Estilo"
+
+green = input.color(color.new(#089981, 80), 
+     title = "Color Alcista (Bull)", 
+     group = grupo_colores,
+     tooltip = "Color para FVGs alcistas (zonas de soporte potencial)")
+
+red = input.color(color.new(#f23645, 80), 
+     title = "Color Bajista (Bear)", 
+     group = grupo_colores,
+     tooltip = "Color para FVGs bajistas (zonas de resistencia potencial)")
+
+gray = input.color(#787b86, 
+     title = "Color Línea Media", 
+     group = grupo_colores,
+     tooltip = "Color de la línea discontinua que marca el centro del FVG")
+
+invis = color.rgb(0,0,0,100)
+
+show_labels = input.bool(true,
+     title = "Mostrar Señales (▲▼)",
+     group = grupo_colores,
+     tooltip = "Muestra/oculta las flechas de señal cuando el precio rebota desde un FVG")
+
+label_size = input.string("normal",
+     title = "Tamaño de Señales",
+     options = ["tiny", "small", "normal", "large"],
+     group = grupo_colores,
+     tooltip = "Tamaño de las flechas ▲ y ▼ que marcan las señales de trading")
+
+//─────────────────────────────────────────────────────────────────────────────
+grupo_visual = "👁️ Visualización"
+
+show_future_extension = input.bool(true,
+     title = "Mostrar Extensión Futura",
+     group = grupo_visual,
+     tooltip = "Extiende las zonas FVG hacia la derecha del gráfico.\n\n" +
+               "• Activado = Puedes ver las zonas proyectadas hacia adelante\n" +
+               "• Desactivado = Solo muestra el período histórico donde ocurrió el FVG")
+
+show_midline = input.bool(true,
+     title = "Mostrar Línea Media",
+     group = grupo_visual,
+     tooltip = "Muestra una línea discontinua en el centro del FVG.\n\n" +
+               "Útil para:\n" +
+               "• Identificar el precio 'justo' del gap\n" +
+               "• Usar como objetivo de entrada en el punto medio")
+
+transparency = input.int(80,
+     title = "Transparencia de Zonas",
+     minval = 0,
+     maxval = 95,
+     step = 5,
+     group = grupo_visual,
+     tooltip = "Transparencia de las cajas FVG (0-95).\n\n" +
+               "• 0 = Completamente opaco (sólido)\n" +
+               "• 50 = Semi-transparente\n" +
+               "• 90+ = Casi invisible\n\n" +
+               "Recomendado: 70-85 para visibilidad clara sin ocultar velas")
+
+//─────────────────────────────────────────────────────────────────────────────
+grupo_alertas = "🔔 Configuración de Alertas"
+
+alert_bull = input.bool(true,
+     title = "Alertas Alcistas",
+     group = grupo_alertas,
+     tooltip = "Genera alerta cuando aparece señal alcista ▲")
+
+alert_bear = input.bool(true,
+     title = "Alertas Bajistas",
+     group = grupo_alertas,
+     tooltip = "Genera alerta cuando aparece señal bajista ▼")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 📊 ESTRUCTURAS DE DATOS (UDT - User Defined Types)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Estructura para almacenar datos de las etiquetas/señales
+type lab
+    int x        // Posición temporal (time)
+    float y      // Precio donde aparece la señal
+    int dir      // Dirección: 1 = alcista, -1 = bajista
+
+// Estructura principal que contiene TODA la información de un FVG
+type fvg
+    int left = na        // Barra donde INICIA el FVG
+    float top = na       // Precio SUPERIOR del FVG
+    int right = na       // Barra donde TERMINA el FVG
+    float bot = na       // Precio INFERIOR del FVG
+    float mid = na       // Precio MEDIO del FVG (para línea central)
+    int dir = na         // Dirección original: 1 = bull, -1 = bear
+    int state = na       // Estado: 0 = nuevo, 1 = invertido
+    array<lab> labs = na // Array de señales generadas por este FVG
+    int x_val = na       // Valor temporal de inversión
+
+//═════════════════════════════════════════════════════════════════════════════
+// 🔧 FUNCIONES PRINCIPALES
+//═════════════════════════════════════════════════════════════════════════════
+
+// Cálculos básicos de velas
+c_top = math.max(open, close)  // Tope del cuerpo de la vela
+c_bot = math.min(open, close)  // Base del cuerpo de la vela
+
+//─────────────────────────────────────────────────────────────────────────────
+// Función: Crear etiquetas de señal (▲ o ▼)
+//─────────────────────────────────────────────────────────────────────────────
+label_maker(_x, _y, _dir) =>
+    if not show_labels
+        label(na)  // No crear label si está desactivado
+    else
+        _size = switch label_size
+            "tiny" => size.tiny
+            "small" => size.small
+            "normal" => size.normal
+            "large" => size.large
+            => size.small
+        
+        switch
+            _dir == 1 => 
+                label.new(_x, _y, "\n▲", 
+                     style = label.style_text_outline, 
+                     color = invis, 
+                     textcolor = color.new(green, 0), 
+                     size = _size, 
+                     xloc = xloc.bar_time)
+            _dir == -1 => 
+                label.new(_x, _y, "▼\n", 
+                     style = label.style_text_outline, 
+                     color = invis, 
+                     textcolor = color.new(red, 0), 
+                     size = _size, 
+                     xloc = xloc.bar_time)
+
+//─────────────────────────────────────────────────────────────────────────────
+// Función: Gestionar FVGs y detectar inversiones
+//─────────────────────────────────────────────────────────────────────────────
+// Filtra FVGs y los mueve al array de inversiones cuando se tocan
+fvg_manage(_ary, _inv_ary) =>
+    // Limitar tamaño del buffer
+    if _ary.size() >= buffer_size
+        _ary.shift()  // Eliminar el FVG más antiguo
+
+    if _ary.size() > 0
+        // Revisar cada FVG en el array
+        for i = _ary.size() - 1 to 0
+            value = _ary.get(i)
+            _dir = value.dir
+
+            // INVERSIÓN ALCISTA: Precio cae POR DEBAJO del FVG alcista
+            if _dir == 1 and (c_bot < value.bot)
+                value.x_val := time
+                _inv_ary.push(_ary.remove(i))  // Mover a array de inversiones
+            
+            // INVERSIÓN BAJISTA: Precio sube POR ENCIMA del FVG bajista
+            if _dir == -1 and (c_top > value.top)
+                value.x_val := time
+                _inv_ary.push(_ary.remove(i))
+
+//─────────────────────────────────────────────────────────────────────────────
+// Función: Gestionar inversiones y generar señales
+//─────────────────────────────────────────────────────────────────────────────
+inv_manage(_ary) =>
+    fire = false  // Flag para detectar nueva señal
+    
+    // Limitar tamaño del buffer
+    if _ary.size() >= buffer_size
+        _ary.shift()
+    
+    if _ary.size() > 0
+        for i = _ary.size() - 1 to 0
+            value = _ary.get(i)
+            bx_top = value.top
+            bx_bot = value.bot
+            _dir = value.dir
+            st = value.state
+
+            // CAMBIAR ESTADO: Marcar como "invertido" y cambiar dirección esperada
+            if (st == 0 and _dir == 1)
+                value.state := 1
+                value.dir := -1  // Ahora espera señal bajista
+            if (_dir == -1 and st == 0)
+                value.state := 1
+                value.dir := 1   // Ahora espera señal alcista
+            
+            // Actualizar extensión temporal
+            if st >= 1
+                value.right := time
+
+            // SEÑAL BAJISTA: Precio toca FVG invertido desde arriba y cae
+            if (_dir == -1 and st == 1 and close < bx_bot and 
+                 (wt ? high : close[1]) >= bx_bot and 
+                 (wt ? high : close[1]) < bx_top)
+                value.labs.push(lab.new(time, bx_top, -1))
+                fire := true
+
+            // SEÑAL ALCISTA: Precio toca FVG invertido desde abajo y sube
+            if (_dir == 1 and st == 1 and close > bx_top and 
+                 (wt ? low : close[1]) <= bx_top and 
+                 (wt ? low : close[1]) > bx_bot)
+                value.labs.push(lab.new(time, bx_bot, 1))
+                fire := true
+
+            // ELIMINAR FVG: Si el precio rompe completamente la zona
+            if st >= 1 and ((_dir == -1 and c_top > bx_top) or 
+                           (_dir == 1 and c_bot < bx_bot))
+                _ary.remove(i)
+    
+    fire  // Retorna true si hubo señal
+
+//─────────────────────────────────────────────────────────────────────────────
+// Función: Dibujar FVGs en el gráfico
+//─────────────────────────────────────────────────────────────────────────────
+send_it(_ary) =>
+    last_index = _ary.size() - 1
+    
+    for [index, value] in _ary
+        bx_top = value.top
+        bx_bot = value.bot
+        bx_left = value.left
+        xval = value.x_val
+        mid = value.mid
+        col = value.dir == -1 ? green : red  // Color según dirección
+        o_col = value.dir == -1 ? red : green  // Color opuesto (invertido)
+
+        // Solo mostrar los últimos N FVGs
+        if index > last_index - disp_num
+            // Caja ANTES de la inversión (color original)
+            box.new(bx_left, bx_top, xval, bx_bot, 
+                 bgcolor = color.new(col, transparency), 
+                 border_color = invis, 
+                 xloc = xloc.bar_time)
+            
+            // Caja DESPUÉS de la inversión (color opuesto)
+            box.new(xval, bx_top, time, bx_bot, 
+                 bgcolor = color.new(o_col, transparency), 
+                 border_color = invis, 
+                 xloc = xloc.bar_time)
+
+            // Línea media (histórica)
+            if show_midline
+                line.new(bx_left, mid, time, mid, 
+                     color = gray, 
+                     style = line.style_dashed, 
+                     xloc = xloc.bar_time)
+            
+            // Extensión futura (derecha del gráfico)
+            if show_future_extension
+                box.new(bar_index, bx_top, bar_index + max_extension, bx_bot, 
+                     bgcolor = color.new(o_col, transparency), 
+                     border_color = invis)
+                
+                if show_midline
+                    line.new(bar_index, mid, bar_index + max_extension, mid, 
+                         color = gray, 
+                         style = line.style_dashed)
+
+            // Dibujar señales (▲ ▼)
+            for stuff in value.labs
+                label_maker(stuff.x, stuff.y, stuff.dir)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 🗑️ LIMPIAR DIBUJOS PREVIOS (Importante para rendimiento)
+//═════════════════════════════════════════════════════════════════════════════
+for boxes in box.all
+    box.delete(boxes)
+
+for lines in line.all
+    line.delete(lines)
+
+for labels in label.all
+    label.delete(labels)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 💾 ARRAYS DE DATOS (Almacenamiento en memoria)
+//═════════════════════════════════════════════════════════════════════════════
+var bull_fvg_ary = array.new<fvg>(na)  // FVGs alcistas detectados  (no todos mostrados)
+var bear_fvg_ary = array.new<fvg>(na)  // FVGs bajistas detectados (no todos mostrados)
+
+var bull_inv_ary = array.new<fvg>(na)  // FVGs alcistas INVERTIDOS (todos mostrados)
+var bear_inv_ary = array.new<fvg>(na)  // FVGs bajistas INVERTIDOS (todos mostrados)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 🔍 DETECCIÓN DE FVG (Lógica Principal)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Calcular ATR para filtro de tamaño
+atr = nz(ta.atr(atr_length) * atr_multi, ta.cum(high - low) / (bar_index + 1))
+
+// CONDICIÓN FVG ALCISTA:
+// El low actual > high de hace 2 velas Y close de vela previa > high de hace 2 velas
+fvg_up = (low > high[2]) and (close[1] > high[2])
+
+// CONDICIÓN FVG BAJISTA:
+// El high actual < low de hace 2 velas Y close de vela previa < low de hace 2 velas
+fvg_down = (high < low[2]) and (close[1] < low[2])
+
+// CREAR FVG ALCISTA si cumple condiciones Y es lo suficientemente grande
+if fvg_up and math.abs(low - high[2]) > atr
+    array.push(bull_fvg_ary, 
+         fvg.new(
+              time[1],                      // left: inicio del FVG
+              low,                          // top: precio superior
+              time,                         // right: fin del FVG
+              high[2],                      // bot: precio inferior
+              math.avg(low, high[2]),       // mid: precio medio
+              1,                            // dir: alcista
+              0,                            // state: nuevo
+              array.new<lab>(na),           // labs: array vacío de señales
+              na))                          // x_val: sin inversión aún
+
+// CREAR FVG BAJISTA si cumple condiciones Y es lo suficientemente grande
+if fvg_down and math.abs(low[2] - high) > atr
+    array.push(bear_fvg_ary, 
+         fvg.new(
+              time[1],                      // left
+              low[2],                       // top
+              time,                         // right
+              high,                         // bot
+              math.avg(high, low[2]),       // mid
+              -1,                           // dir: bajista
+              0,                            // state: nuevo
+              array.new<lab>(na),           // labs
+              na))                          // x_val
+
+//═════════════════════════════════════════════════════════════════════════════
+// ⚙️ EJECUTAR FUNCIONES (Procesamiento en cada barra)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Paso 1: Gestionar FVGs y detectar inversiones
+fvg_manage(bull_fvg_ary, bull_inv_ary)
+fvg_manage(bear_fvg_ary, bear_inv_ary)
+
+// Paso 2: Gestionar inversiones y generar señales
+bear_signal = inv_manage(bull_inv_ary)  // FVG alcista invertido → señal bajista
+bull_signal = inv_manage(bear_inv_ary)  // FVG bajista invertido → señal alcista
+
+// Paso 3: Dibujar en el gráfico (solo en última barra)
+if barstate.islast
+    send_it(bull_inv_ary)
+    send_it(bear_inv_ary)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 🔔 ALERTAS
+//═════════════════════════════════════════════════════════════════════════════
+alertcondition(bull_signal and alert_bull, 
+     "Señal Alcista IFVG", 
+     "🟢 SEÑAL ALCISTA: Precio rebotó desde FVG invertido ▲")
+
+alertcondition(bear_signal and alert_bear, 
+     "Señal Bajista IFVG", 
+     "🔴 SEÑAL BAJISTA: Precio rebotó desde FVG invertido ▼")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 📝 NOTAS FINALES
+//═════════════════════════════════════════════════════════════════════════════
+/*
+FLUJO DEL INDICADOR:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Detectar FVG → Guardar en array (bull_fvg_ary o bear_fvg_ary)
+2. Esperar inversión → Mover a array de inversiones (bull_inv_ary o bear_inv_ary)
+3. Monitorear rebotes → Generar señales (▲ o ▼)
+4. Dibujar → Mostrar zonas y señales en el gráfico
+5. Eliminar → Borrar FVGs rotos o muy antiguos
+
+ADMINISTRACIÓN DE MEMORIA:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Buffer de 100 FVGs (configurable)
+- Sistema FIFO: Primero en entrar, primero en salir
+- Elimina FVGs cuando:
+  * Se llena el buffer
+  * El precio los rompe completamente
+  * Ya no son relevantes
+
+OPTIMIZACIONES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Limpieza de dibujos en cada barra
+- Filtro ATR para ignorar FVGs pequeños
+- Solo dibuja en última barra (barstate.islast)
+- Límite de objetos: 500 cajas, 500 líneas, 500 etiquetas
+*/

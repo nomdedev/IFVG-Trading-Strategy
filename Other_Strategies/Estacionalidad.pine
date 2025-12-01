@@ -1,0 +1,195 @@
+//@version=5
+indicator("Estacionalidad Mensual Mejorada", overlay=false)
+
+// Inputs para configuración
+showTable = input.bool(true, "Mostrar Tabla de Estadísticas", group="Visualización")
+showLabels = input.bool(false, "Mostrar Etiquetas en Gráfico", group="Visualización")
+minYears = input.int(1, "Mínimo de años para mostrar estadísticas", minval=1, group="Filtros")
+analysisYears = input.int(5, "Años de análisis histórico", minval=1, maxval=20, group="Filtros")
+
+// Arrays para almacenar rendimientos por mes
+var float[] rendimientos_ene = array.new_float(0)
+var float[] rendimientos_feb = array.new_float(0)
+var float[] rendimientos_mar = array.new_float(0)
+var float[] rendimientos_abr = array.new_float(0)
+var float[] rendimientos_may = array.new_float(0)
+var float[] rendimientos_jun = array.new_float(0)
+var float[] rendimientos_jul = array.new_float(0)
+var float[] rendimientos_ago = array.new_float(0)
+var float[] rendimientos_sep = array.new_float(0)
+var float[] rendimientos_oct = array.new_float(0)
+var float[] rendimientos_nov = array.new_float(0)
+var float[] rendimientos_dic = array.new_float(0)
+
+// Función para obtener el array de rendimientos por mes
+get_rendimientos_mes(mes) =>
+    if mes == 0
+        rendimientos_ene
+    else if mes == 1
+        rendimientos_feb
+    else if mes == 2
+        rendimientos_mar
+    else if mes == 3
+        rendimientos_abr
+    else if mes == 4
+        rendimientos_may
+    else if mes == 5
+        rendimientos_jun
+    else if mes == 6
+        rendimientos_jul
+    else if mes == 7
+        rendimientos_ago
+    else if mes == 8
+        rendimientos_sep
+    else if mes == 9
+        rendimientos_oct
+    else if mes == 10
+        rendimientos_nov
+    else
+        rendimientos_dic
+
+// Detectar el índice del mes actual (0 = enero, 11 = diciembre)
+indice_mes = month(time) - 1
+nuevo_mes = ta.change(indice_mes)
+
+// Variable para almacenar el precio de cierre del inicio del mes
+var float cierre_inicio_mes = na
+
+if nuevo_mes != 0
+    if not na(cierre_inicio_mes)
+        // Calcular rendimiento del mes anterior
+        float rendimiento = (close - cierre_inicio_mes) / cierre_inicio_mes * 100
+        int mes_anterior = (indice_mes + 11) % 12 // Evita índices negativos en enero
+        
+        // Agregar rendimiento al array correspondiente
+        if mes_anterior == 0
+            array.push(rendimientos_ene, rendimiento)
+        else if mes_anterior == 1
+            array.push(rendimientos_feb, rendimiento)
+        else if mes_anterior == 2
+            array.push(rendimientos_mar, rendimiento)
+        else if mes_anterior == 3
+            array.push(rendimientos_abr, rendimiento)
+        else if mes_anterior == 4
+            array.push(rendimientos_may, rendimiento)
+        else if mes_anterior == 5
+            array.push(rendimientos_jun, rendimiento)
+        else if mes_anterior == 6
+            array.push(rendimientos_jul, rendimiento)
+        else if mes_anterior == 7
+            array.push(rendimientos_ago, rendimiento)
+        else if mes_anterior == 8
+            array.push(rendimientos_sep, rendimiento)
+        else if mes_anterior == 9
+            array.push(rendimientos_oct, rendimiento)
+        else if mes_anterior == 10
+            array.push(rendimientos_nov, rendimiento)
+        else
+            array.push(rendimientos_dic, rendimiento)
+    
+    // Actualizar el precio de inicio de mes
+    cierre_inicio_mes := close
+
+// Función para convertir número de mes a nombre
+month_to_str(m) =>
+    switch m
+        0  => "Enero"
+        1  => "Febrero"
+        2  => "Marzo"
+        3  => "Abril"
+        4  => "Mayo"
+        5  => "Junio"
+        6  => "Julio"
+        7  => "Agosto"
+        8  => "Septiembre"
+        9  => "Octubre"
+        10 => "Noviembre"
+        11 => "Diciembre"
+
+// Función para calcular estadísticas de los últimos N años
+calc_stats_recent(rends, years) =>
+    int count = array.size(rends)
+    float avg = 0.0
+    float max_val = 0.0
+    float min_val = 0.0
+    float std_dev = 0.0
+    if count == 0
+        avg := 0.0
+        max_val := 0.0
+        min_val := 0.0
+        std_dev := 0.0
+    else
+        int start_idx = math.max(0, count - years)
+        int actual_count = count - start_idx
+        if actual_count == 0
+            avg := 0.0
+            max_val := 0.0
+            min_val := 0.0
+            std_dev := 0.0
+        else
+            float sum = 0.0
+            max_val := array.get(rends, start_idx)
+            min_val := array.get(rends, start_idx)
+            for i = start_idx to count - 1
+                float val = array.get(rends, i)
+                sum += val
+                max_val := math.max(max_val, val)
+                min_val := math.min(min_val, val)
+            avg := sum / actual_count
+            float sum_sq = 0.0
+            for i = start_idx to count - 1
+                float val = array.get(rends, i)
+                sum_sq += math.pow(val - avg, 2)
+            std_dev := actual_count > 1 ? math.sqrt(sum_sq / (actual_count - 1)) : 0.0
+    [avg, max_val, min_val, std_dev]
+
+// Crear tabla de estadísticas
+if showTable and barstate.islast
+    var table tbl = table.new(position.middle_right, 7, 14, bgcolor=color.new(color.black, 90), border_color=color.white, border_width=1)
+    
+    // Headers
+    table.cell(tbl, 0, 0, "Mes", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 0, "Promedio", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, 0, "Máximo", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 3, 0, "Mínimo", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 4, 0, "Conteo", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 5, 0, "Std Dev", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 6, 0, "Tendencia", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=size.small)
+    
+    // Datos por mes
+    for i = 0 to 11
+        float[] rends = get_rendimientos_mes(i)
+        int count = array.size(rends)
+        if count >= minYears
+            [avg, max_val, min_val, std_dev] = calc_stats_recent(rends, analysisYears)
+            // Determinar tendencia histórica
+            string tendencia = avg >= 0 ? "Alcista" : "Bajista"
+            color tendencia_color = avg >= 0 ? color.new(color.green, 60) : color.new(color.red, 60)
+            // Color basado en rendimiento promedio
+            color cell_color = avg >= 0 ? color.new(color.green, 80) : color.new(color.red, 80)
+            table.cell(tbl, 0, i+1, month_to_str(i), bgcolor=cell_color, text_color=color.white, text_size=size.small)
+            table.cell(tbl, 1, i+1, str.tostring(avg, "#.##") + "%", bgcolor=cell_color, text_color=color.white, text_size=size.small)
+            table.cell(tbl, 2, i+1, str.tostring(max_val, "#.##") + "%", bgcolor=cell_color, text_color=color.white, text_size=size.small)
+            table.cell(tbl, 3, i+1, str.tostring(min_val, "#.##") + "%", bgcolor=cell_color, text_color=color.white, text_size=size.small)
+            table.cell(tbl, 4, i+1, str.tostring(count), bgcolor=cell_color, text_color=color.white, text_size=size.small)
+            table.cell(tbl, 5, i+1, str.tostring(std_dev, "#.##") + "%", bgcolor=cell_color, text_color=color.white, text_size=size.small)
+            table.cell(tbl, 6, i+1, tendencia, bgcolor=tendencia_color, text_color=color.white, text_size=size.small)
+        else
+            table.cell(tbl, 0, i+1, month_to_str(i), bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+            table.cell(tbl, 1, i+1, "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+            table.cell(tbl, 2, i+1, "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+            table.cell(tbl, 3, i+1, "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+            table.cell(tbl, 4, i+1, str.tostring(count), bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+            table.cell(tbl, 5, i+1, "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+            table.cell(tbl, 6, i+1, "N/A", bgcolor=color.new(color.gray, 80), text_color=color.white, text_size=size.small)
+
+// Mostrar etiquetas opcionales en el gráfico (deshabilitado por simplicidad)
+if false
+    for i = 0 to 11
+        float[] rends = get_rendimientos_mes(i)
+        int count = array.size(rends)
+        if count >= minYears
+            float[] stats = calc_stats_recent(rends, analysisYears)
+            float avg = array.get(stats, 0)
+            color lbl_color = avg >= 0 ? color.green : color.red
+            // Etiquetas deshabilitadas para evitar errores

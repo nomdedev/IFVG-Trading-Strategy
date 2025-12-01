@@ -1,0 +1,253 @@
+//@version=5
+strategy("Smart Signals Assistant", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================================================
+// INPUTS - Configuración del Usuario
+// ============================================================================
+
+// --- Smart Signals Engine (Implementado con EMA Crossover) ---
+input_group_signals = "🔵 Smart Signals Engine"
+ema_fast_length = input.int(9, "EMA Rápida (Fast)", minval=1, group=input_group_signals, tooltip="Longitud de la EMA rápida para detectar señales")
+ema_slow_length = input.int(21, "EMA Lenta (Slow)", minval=1, group=input_group_signals, tooltip="Longitud de la EMA lenta para detectar señales")
+signal_mode = input.string("Trend", "Modo de Señal", options=["Trend", "Reversal"], group=input_group_signals, tooltip="Trend: Señales a favor de tendencia | Reversal: Señales de reversión")
+use_atr_filter = input.bool(true, "Filtro de Volatilidad (ATR)", group=input_group_signals, tooltip="Requiere volatilidad mínima para validar señales")
+atr_length = input.int(14, "Longitud ATR", minval=1, group=input_group_signals)
+atr_multiplier = input.float(1.5, "Multiplicador ATR Mínimo", minval=0.1, step=0.1, group=input_group_signals)
+
+// --- Trend-Range Classifier (TRC) - Implementado con ADX ---
+input_group_trc = "🟢 Trend-Range Classifier (TRC)"
+enable_trc = input.bool(true, "Activar TRC (Filtro ADX)", group=input_group_trc)
+adx_length = input.int(14, "Longitud ADX", minval=1, group=input_group_trc)
+adx_threshold = input.float(25.0, "Umbral ADX (Trending)", minval=10, maxval=50, step=1, group=input_group_trc, tooltip="ADX > umbral = Trending | ADX < umbral = Ranging")
+di_length = input.int(14, "Longitud DI", minval=1, group=input_group_trc)
+
+// --- Fair Value Trail (FVT) - Implementado como Trailing Stop ATR ---
+input_group_fvt = "🟡 Fair Value Trail (FVT)"
+enable_fvt = input.bool(true, "Activar FVT (Trailing Stop)", group=input_group_fvt)
+fvt_atr_length = input.int(10, "Longitud ATR para FVT", minval=1, group=input_group_fvt)
+fvt_atr_multiplier = input.float(2.0, "Multiplicador ATR para FVT", minval=0.5, step=0.1, group=input_group_fvt)
+
+// --- Gestión de Trading ---
+input_group_trade = "🔴 Gestión de Trading"
+use_tp = input.bool(true, "Usar Take Profit", group=input_group_trade)
+tp_percent = input.float(3.0, "Take Profit (%)", minval=0.1, step=0.1, group=input_group_trade)
+use_sl = input.bool(true, "Usar Stop Loss", group=input_group_trade)
+sl_percent = input.float(1.5, "Stop Loss (%)", minval=0.1, step=0.1, group=input_group_trade)
+
+// --- Trend Spine (Implementado como EMA de largo plazo) ---
+input_group_spine = "🟣 Trend Spine"
+enable_spine = input.bool(true, "Mostrar Trend Spine", group=input_group_spine)
+spine_length = input.int(50, "Longitud Trend Spine", minval=10, group=input_group_spine)
+
+// --- Firmament Clouds (Bandas de volatilidad dinámicas) ---
+input_group_clouds = "🟠 Firmament Clouds"
+enable_clouds = input.bool(true, "Mostrar Firmament Clouds", group=input_group_clouds)
+cloud_length = input.int(20, "Longitud Base Clouds", minval=10, group=input_group_clouds)
+cloud_multiplier = input.float(2.0, "Multiplicador Volatilidad", minval=0.5, step=0.1, group=input_group_clouds)
+
+// --- Visualización ---
+input_group_visual = "⚙️ Visualización"
+show_signals = input.bool(true, "Mostrar Señales en Chart", group=input_group_visual)
+show_levels = input.bool(true, "Mostrar TP/SL en Chart", group=input_group_visual)
+
+// ============================================================================
+// CÁLCULOS PRINCIPALES
+// ============================================================================
+
+// --- 1. SMART SIGNALS ENGINE (EMA Crossover con filtro ATR) ---
+// Implementación del modo "Swing" usando EMAs
+ema_fast = ta.ema(close, ema_fast_length)
+ema_slow = ta.ema(close, ema_slow_length)
+atr = ta.atr(atr_length)
+
+// Detección de cruces
+bullish_cross = ta.crossover(ema_fast, ema_slow)
+bearish_cross = ta.crossunder(ema_fast, ema_slow)
+
+// Filtro de volatilidad (ATR)
+min_atr = ta.sma(atr, 20) * atr_multiplier
+volatility_ok = not use_atr_filter or atr >= min_atr
+
+// Señales fuertes: cruces con momentum adicional
+momentum = close - close[5]
+strong_bullish = bullish_cross and momentum > 0 and volatility_ok
+strong_bearish = bearish_cross and momentum < 0 and volatility_ok
+
+// Señales normales
+normal_bullish = bullish_cross and not strong_bullish and volatility_ok
+normal_bearish = bearish_cross and not strong_bearish and volatility_ok
+
+// Aplicar modo de señal (Trend o Reversal)
+signal_bullish = signal_mode == "Trend" ? (strong_bullish or normal_bullish) : (strong_bearish or normal_bearish)
+signal_bearish = signal_mode == "Trend" ? (strong_bearish or normal_bearish) : (strong_bullish or normal_bullish)
+
+// --- 2. TREND-RANGE CLASSIFIER (TRC) usando ADX ---
+// Implementación del clasificador de mercado
+[diplus, diminus, adx] = ta.dmi(di_length, adx_length)
+
+// Clasificación: Trending si ADX > umbral
+is_trending = adx > adx_threshold
+is_ranging = not is_trending
+
+// Dirección de la tendencia
+trend_bullish = diplus > diminus
+trend_bearish = diminus > diplus
+
+// --- 3. FAIR VALUE TRAIL (FVT) - Trailing Stop basado en ATR ---
+// Implementación similar a SuperTrend
+fvt_atr = ta.atr(fvt_atr_length)
+fvt_offset = fvt_atr * fvt_atr_multiplier
+
+// Cálculo del FVT
+var float fvt_trail = na
+var int fvt_direction = 0
+
+hl2_avg = hl2
+longStop = hl2_avg - fvt_offset
+shortStop = hl2_avg + fvt_offset
+
+// Lógica del trailing
+var float longStopPrev = na
+var float shortStopPrev = na
+
+longStopPrev := nz(longStop[1], longStop)
+longStop := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStopPrev := nz(shortStop[1], shortStop)
+shortStop := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+var int dir = 1
+dir := close > shortStopPrev ? 1 : close < longStopPrev ? -1 : dir
+
+fvt_trail := dir == 1 ? longStop : shortStop
+fvt_direction := dir
+
+fvt_bullish = fvt_direction == 1
+fvt_bearish = fvt_direction == -1
+
+// --- 4. TREND SPINE (EMA de largo plazo para filtrar ruido) ---
+trend_spine = ta.ema(close, spine_length)
+above_spine = close > trend_spine
+below_spine = close < trend_spine
+
+// --- 5. FIRMAMENT CLOUDS (Bandas dinámicas de soporte/resistencia) ---
+cloud_basis = ta.sma(close, cloud_length)
+cloud_dev = ta.stdev(close, cloud_length) * cloud_multiplier
+cloud_upper = cloud_basis + cloud_dev
+cloud_lower = cloud_basis - cloud_dev
+
+// ============================================================================
+// LÓGICA DE ENTRADA Y SALIDA
+// ============================================================================
+
+// Condiciones para LONG
+long_condition = signal_bullish
+if enable_trc
+    long_condition := long_condition and is_trending and trend_bullish
+if enable_fvt
+    long_condition := long_condition and fvt_bullish and close > fvt_trail
+
+// Condiciones para SHORT
+short_condition = signal_bearish
+if enable_trc
+    short_condition := short_condition and is_trending and trend_bearish
+if enable_fvt
+    short_condition := short_condition and fvt_bearish and close < fvt_trail
+
+// Ejecutar entradas
+if long_condition and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+if short_condition and strategy.position_size == 0
+    strategy.entry("Short", strategy.short)
+
+// ============================================================================
+// GESTIÓN DE SALIDAS (TP/SL)
+// ============================================================================
+
+// Calcular niveles de TP y SL
+if strategy.position_size > 0  // Long position
+    long_tp = strategy.position_avg_price * (1 + tp_percent / 100)
+    long_sl = strategy.position_avg_price * (1 - sl_percent / 100)
+    
+    if use_tp and use_sl
+        strategy.exit("TP/SL Long", "Long", limit=long_tp, stop=long_sl)
+    else if use_tp
+        strategy.exit("TP Long", "Long", limit=long_tp)
+    else if use_sl
+        strategy.exit("SL Long", "Long", stop=long_sl)
+
+if strategy.position_size < 0  // Short position
+    short_tp = strategy.position_avg_price * (1 - tp_percent / 100)
+    short_sl = strategy.position_avg_price * (1 + sl_percent / 100)
+    
+    if use_tp and use_sl
+        strategy.exit("TP/SL Short", "Short", limit=short_tp, stop=short_sl)
+    else if use_tp
+        strategy.exit("TP Short", "Short", limit=short_tp)
+    else if use_sl
+        strategy.exit("SL Short", "Short", stop=short_sl)
+
+// ============================================================================
+// VISUALIZACIÓN EN CHART
+// ============================================================================
+
+// --- Señales ---
+// Los plotshape deben estar en scope global, no dentro de if
+plotshape(show_signals and strong_bullish and signal_mode == "Trend", "Strong Buy", shape.labelup, location.belowbar, color.new(color.green, 0), text="+▲", textcolor=color.white, size=size.normal)
+plotshape(show_signals and normal_bullish and signal_mode == "Trend", "Normal Buy", shape.triangleup, location.belowbar, color.new(color.lime, 30), text="▲", size=size.small)
+plotshape(show_signals and strong_bearish and signal_mode == "Trend", "Strong Sell", shape.labeldown, location.abovebar, color.new(color.red, 0), text="+▼", textcolor=color.white, size=size.normal)
+plotshape(show_signals and normal_bearish and signal_mode == "Trend", "Normal Sell", shape.triangledown, location.abovebar, color.new(color.orange, 30), text="▼", size=size.small)
+
+// --- Fair Value Trail (FVT) ---
+plot(enable_fvt ? fvt_trail : na, "FVT Trail", color=fvt_bullish ? color.new(color.green, 20) : color.new(color.red, 20), linewidth=2, style=plot.style_line)
+
+// --- Trend Spine ---
+plot(enable_spine ? trend_spine : na, "Trend Spine", color=color.new(color.blue, 50), linewidth=2, style=plot.style_line)
+
+// --- EMAs del Smart Signals Engine ---
+plot(ema_fast, "EMA Fast", color=color.new(color.yellow, 30), linewidth=1)
+plot(ema_slow, "EMA Slow", color=color.new(color.purple, 30), linewidth=1)
+
+// --- Firmament Clouds ---
+upper_line = plot(enable_clouds ? cloud_upper : na, "Cloud Upper", color=color.new(color.gray, 80), linewidth=1)
+lower_line = plot(enable_clouds ? cloud_lower : na, "Cloud Lower", color=color.new(color.gray, 80), linewidth=1)
+fill(upper_line, lower_line, color=enable_clouds ? color.new(color.blue, 90) : na, title="Firmament Cloud")
+
+// --- Niveles de TP/SL ---
+// Calcular niveles de TP y SL para visualización
+var float visual_tp = na
+var float visual_sl = na
+
+if show_levels and strategy.position_size > 0
+    visual_tp := strategy.position_avg_price * (1 + tp_percent / 100)
+    visual_sl := strategy.position_avg_price * (1 - sl_percent / 100)
+else if show_levels and strategy.position_size < 0
+    visual_tp := strategy.position_avg_price * (1 - tp_percent / 100)
+    visual_sl := strategy.position_avg_price * (1 + sl_percent / 100)
+else
+    visual_tp := na
+    visual_sl := na
+
+// Plotear niveles de TP y SL
+plot(show_levels and use_tp ? visual_tp : na, "Take Profit", color=color.new(color.green, 0), linewidth=2, style=plot.style_linebr)
+plot(show_levels and use_sl ? visual_sl : na, "Stop Loss", color=color.new(color.red, 0), linewidth=2, style=plot.style_linebr)
+
+// --- Coloreado de fondo según estado del mercado (TRC) ---
+bgcolor(enable_trc and is_ranging ? color.new(color.gray, 95) : na, title="Ranging Market")
+
+// ============================================================================
+// ALERTAS
+// ============================================================================
+
+// Alertas para señales fuertes
+alertcondition(strong_bullish and long_condition, "Strong Buy Signal", "🚀 STRONG BUY: Todas las condiciones alineadas")
+alertcondition(strong_bearish and short_condition, "Strong Sell Signal", "🔻 STRONG SELL: Todas las condiciones alineadas")
+
+// Alertas para cambios de estado del TRC
+alertcondition(ta.change(is_trending) and is_trending, "Market Now Trending", "📈 Market cambió a TRENDING")
+alertcondition(ta.change(is_ranging) and is_ranging, "Market Now Ranging", "📊 Market cambió a RANGING")
+
+// Alertas para FVT
+alertcondition(ta.change(fvt_direction) and fvt_bullish, "FVT Bullish", "🟢 Fair Value Trail ahora BULLISH")
+alertcondition(ta.change(fvt_direction) and fvt_bearish, "FVT Bearish", "🔴 Fair Value Trail ahora BEARISH")

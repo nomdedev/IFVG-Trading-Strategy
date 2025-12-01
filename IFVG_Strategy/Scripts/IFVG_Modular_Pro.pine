@@ -1,0 +1,562 @@
+//@version=5
+indicator("IFVG Modular Pro", "IFVG Pro ☼☾", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 1. SISTEMA DE MÓDULOS (Máximo 2 activos para optimización)
+//═════════════════════════════════════════════════════════════════════════════
+
+modGR = "🔧 Selector de Módulos"
+
+modTT = "⚠️ IMPORTANTE: Por razones de rendimiento, solo puede activar MÁXIMO 2 MÓDULOS a la vez.\n\n" +
+        "Si activa más de 2, el sistema desactivará automáticamente los excedentes.\n\n" +
+        "Módulos disponibles:\n" +
+        "• IFVG: Detecta Inversion Fair Value Gaps\n" +
+        "• Liquidación: Señales de liquidación con Z-Score\n" +
+        "• Volume Profile: Perfil de volumen por precio\n" +
+        "• EMAs: Medias móviles exponenciales\n" +
+        "• Vol Histogram: Histograma de volumen"
+
+// Inputs de módulos
+mod_ifvg_input = input.bool(true, "📊 Módulo IFVG", group=modGR, tooltip="Detecta Inversion Fair Value Gaps (zonas donde el precio invierte tras llenar un gap). Muestra cajas verdes (alcistas) y rojas (bajistas) en el gráfico.")
+mod_liq_input = input.bool(false, "💧 Módulo Liquidación", group=modGR, tooltip="Detecta picos de volumen anómalos (Z-Score) combinados con cambios de SuperTrend para identificar posibles eventos de liquidación masiva.")
+mod_vp_input = input.bool(true, "📈 Módulo Volume Profile", group=modGR, tooltip="Muestra el perfil de volumen por niveles de precio. Incluye POC, Value Area, zonas de Supply/Demand. Consume más recursos.")
+mod_ema_input = input.bool(false, "📉 Módulo EMAs", group=modGR, tooltip="Muestra 3 EMAs (50, 100, 200) para análisis de tendencia. Puede usarse como filtro para las señales IFVG.")
+mod_vhist_input = input.bool(false, "📊 Módulo Vol Histogram", group=modGR, tooltip="Histograma de volumen superpuesto en el gráfico. Muestra el volumen de cada vela como barras verticales.")
+
+// Contar módulos activos
+int mod_count = (mod_ifvg_input ? 1 : 0) + (mod_liq_input ? 1 : 0) + (mod_vp_input ? 1 : 0) + (mod_ema_input ? 1 : 0) + (mod_vhist_input ? 1 : 0)
+
+// Sistema de prioridad: Si hay más de 2, desactiva los de menor prioridad
+// Prioridad: IFVG > VP > EMA > Liquidación > VHist
+bool mod_ifvg = mod_ifvg_input and mod_count <= 2 ? true : mod_ifvg_input and (mod_ifvg_input ? 1 : 0) <= 2
+bool mod_vp = mod_vp_input
+bool mod_ema = mod_ema_input
+bool mod_liq = mod_liq_input
+bool mod_vhist = mod_vhist_input
+
+// Recalcular con sistema de slots (máximo 2)
+var int slot1 = 0  // 1=IFVG, 2=VP, 3=EMA, 4=LIQ, 5=VHIST
+var int slot2 = 0
+
+// Asignar slots por prioridad
+if barstate.isfirst
+    slot1 := 0
+    slot2 := 0
+    
+    if mod_ifvg_input
+        slot1 := 1
+    
+    if mod_vp_input
+        if slot1 == 0
+            slot1 := 2
+        else if slot2 == 0
+            slot2 := 2
+    
+    if mod_ema_input
+        if slot1 == 0
+            slot1 := 3
+        else if slot2 == 0
+            slot2 := 3
+    
+    if mod_liq_input
+        if slot1 == 0
+            slot1 := 4
+        else if slot2 == 0
+            slot2 := 4
+    
+    if mod_vhist_input
+        if slot1 == 0
+            slot1 := 5
+        else if slot2 == 0
+            slot2 := 5
+
+// Estados finales de módulos
+mod_ifvg := slot1 == 1 or slot2 == 1
+mod_vp := slot1 == 2 or slot2 == 2
+mod_ema := slot1 == 3 or slot2 == 3
+mod_liq := slot1 == 4 or slot2 == 4
+mod_vhist := slot1 == 5 or slot2 == 5
+
+// Mostrar advertencia si se excedió el límite
+var label warnLabel = na
+if barstate.islast and mod_count > 2
+    label.delete(warnLabel)
+    warnLabel := label.new(bar_index, high, "⚠️ Máx 2 módulos\nActivos: " + str.tostring(mod_count > 2 ? 2 : mod_count) + "/2", 
+                          color=color.new(color.orange, 20), style=label.style_label_down, 
+                          textcolor=color.white, size=size.small)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 2. CONFIGURACIÓN IFVG (Solo si módulo activo)
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_IFVG = "📊 IFVG - Configuración"
+
+show_ifvg_boxes = input.bool(true, "Mostrar Cajas IFVG", group=GRP_IFVG, tooltip="Muestra las cajas visuales de los Fair Value Gaps detectados. Verde = alcista, Rojo = bajista.")
+atr_len = input.int(300, "ATR Período", minval=10, maxval=500, group=GRP_IFVG, tooltip="Período para calcular el ATR. Se usa para filtrar gaps pequeños. Valores más altos = más estable.")
+atr_mul = input.float(0.5, "ATR Multiplicador", step=0.1, minval=0.1, maxval=2.0, group=GRP_IFVG, tooltip="Multiplicador del ATR. El gap debe ser mayor que ATR × este valor para ser válido.")
+buffer_size = input.int(20, "Memoria FVGs", minval=5, maxval=50, group=GRP_IFVG, tooltip="Cantidad de FVGs a mantener en memoria. Los más antiguos se eliminan automáticamente.")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 3. CONFIGURACIÓN LIQUIDATION (Solo si módulo activo)
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_LIQ = "💧 Liquidación - Configuración"
+
+z_len = input.int(200, "Z-Score Período", minval=50, maxval=500, group=GRP_LIQ, tooltip="Período para calcular media y desviación del volumen. Valores altos = picos más extremos requeridos.")
+z_thresh = input.float(3.0, "Z-Score Umbral", step=0.1, minval=1.0, maxval=5.0, group=GRP_LIQ, tooltip="Umbral Z-Score. 3.0 = evento del 0.3% probabilidad. Más alto = menos señales pero más significativas.")
+liq_timeout = input.int(50, "Timeout Confirmación", minval=10, maxval=100, group=GRP_LIQ, tooltip="Barras máximas para esperar confirmación de SuperTrend después del pico de volumen.")
+show_liq_signals = input.bool(true, "Mostrar Señales", group=GRP_LIQ, tooltip="Muestra círculos en velas con picos de liquidación detectados.")
+show_supertrend = input.bool(true, "Mostrar SuperTrend", group=GRP_LIQ, tooltip="Muestra la línea SuperTrend usada para confirmar cambios de tendencia.")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 4. CONFIGURACIÓN VOLUME PROFILE (Solo si módulo activo)
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_VP = "📈 Volume Profile - Configuración"
+
+vpTP = "El Volume Profile muestra la actividad de trading por nivel de precio.\n\n" +
+       "• Zonas de alto volumen = áreas de consolidación\n" +
+       "• Zonas de bajo volumen = supply/demand zones\n" +
+       "• POC = nivel con mayor volumen"
+
+vpLN_input = input.int(360, "Período de Análisis", minval=50, maxval=2000, step=10, group=GRP_VP, tooltip="Número de barras históricas para el cálculo. Más barras = visión de largo plazo pero más lento.")
+vpNR = input.int(80, "Número de Filas", minval=20, maxval=120, step=10, group=GRP_VP, tooltip="Resolución vertical. Más filas = mayor detalle pero más pesado.")
+vpWD = input.float(25, "Ancho del Perfil", minval=5, maxval=100, group=GRP_VP, tooltip="Ancho visual del perfil de volumen.") / 100.0
+vpHO = input.int(10, "Offset Horizontal", minval=0, maxval=30, group=GRP_VP, tooltip="Separación del perfil respecto a las velas.")
+
+vpUC = input.color(color.new(#5d606b, 50), "Up Volume", inline="vpc", group=GRP_VP)
+vpDC = input.color(color.new(#d1d4dc, 50), "Down Volume", inline="vpc", group=GRP_VP)
+pocC = input.color(#f44336, "POC Color", group=GRP_VP, tooltip="Color de la línea Point of Control.")
+
+show_poc = input.bool(true, "Mostrar POC", group=GRP_VP, tooltip="Point of Control - nivel con mayor volumen operado.")
+show_vah_val = input.bool(true, "Mostrar VAH/VAL", group=GRP_VP, tooltip="Value Area High y Low - límites del área donde ocurrió el 68% del volumen.")
+vahC = input.color(#2962ff, "VAH/VAL Color", group=GRP_VP)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 5. CONFIGURACIÓN EMAs (Solo si módulo activo)
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_EMA = "📉 EMAs - Configuración"
+
+ema1_len = input.int(50, "EMA Rápida", minval=5, maxval=100, group=GRP_EMA, tooltip="Período de la EMA rápida. Reacciona rápido a cambios de precio.")
+ema2_len = input.int(100, "EMA Media", minval=20, maxval=200, group=GRP_EMA, tooltip="Período de la EMA media. Balance entre velocidad y estabilidad.")
+ema3_len = input.int(200, "EMA Lenta", minval=50, maxval=400, group=GRP_EMA, tooltip="Período de la EMA lenta. Define la tendencia principal.")
+
+ema1_col = input.color(color.blue, "Color EMA Rápida", group=GRP_EMA)
+ema2_col = input.color(color.orange, "Color EMA Media", group=GRP_EMA)
+ema3_col = input.color(color.red, "Color EMA Lenta", group=GRP_EMA)
+
+use_ema_filter = input.bool(true, "Usar como Filtro IFVG", group=GRP_EMA, tooltip="Si está activo, IFVG solo dará señales LONG sobre EMA lenta y SHORT bajo EMA lenta.")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 6. CONFIGURACIÓN VOLUME HISTOGRAM (Solo si módulo activo)
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_VHIST = "📊 Vol Histogram - Configuración"
+
+vhPL = input.string("Top", "Posición", options=["Top", "Bottom"], group=GRP_VHIST, tooltip="Ubicación del histograma: arriba o abajo del gráfico.")
+vhHT = 11 - input.int(8, "Altura", minval=1, maxval=10, group=GRP_VHIST, tooltip="Altura de las barras. Valores bajos = barras más grandes.")
+vhVO = input.int(1, "Offset Vertical", minval=0, maxval=10, group=GRP_VHIST, tooltip="Separación vertical del histograma.") / 20.0
+vhUC = input.color(color.new(#26a69a, 30), "Alcista", inline="vhc", group=GRP_VHIST)
+vhDC = input.color(color.new(#ef5350, 30), "Bajista", inline="vhc", group=GRP_VHIST)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 7. VARIABLES COMPARTIDAS
+//═════════════════════════════════════════════════════════════════════════════
+
+// Cálculos de vpLN
+var int vpLN = 0
+vpLN := mod_vp ? (last_bar_index < vpLN_input ? last_bar_index : vpLN_input - 1) : 0
+vpLN := math.max(vpLN, 10)
+
+// Arrays para Volume Profile (solo si activo)
+var array<float> bD_bh = array.new_float(0)
+var array<float> bD_bl = array.new_float(0)
+var array<float> bD_bv = array.new_float(0)
+var array<bool>  bD_bp = array.new_bool(0)
+
+var array<float> vD_vt = array.new_float(vpNR, 0.0)
+var array<float> vD_vb = array.new_float(vpNR, 0.0)
+var array<box> VP_boxes = array.new_box(0)
+
+var int VP_sI = 0
+var int VP_pcL = 0
+var int VP_laP = 0
+var int VP_lbP = 0
+var float pHST = na
+var float pLST = na
+
+// Arrays para IFVG (solo si activo)
+var array<float> fvg_top = array.new_float(0)
+var array<float> fvg_bot = array.new_float(0)
+var array<float> fvg_mid = array.new_float(0)
+var array<bool>  fvg_is_bull = array.new_bool(0)
+var array<int>   fvg_left = array.new_int(0)
+var array<box>   fvg_boxes = array.new_box(0)
+
+// Arrays para Volume Histogram (solo si activo)
+var array<line> VH_lines = array.new_line(0)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 8. FUNCIONES AUXILIARES
+//═════════════════════════════════════════════════════════════════════════════
+
+f_gTS(_t) =>
+    switch _t
+        'Tiny'   => size.tiny
+        'Small'  => size.small 
+        'Normal' => size.normal
+        => size.auto
+
+//═════════════════════════════════════════════════════════════════════════════
+// 9. MÓDULO IFVG - LÓGICA
+//═════════════════════════════════════════════════════════════════════════════
+
+// Variables de señal
+bool signal_ifvg_long = false
+bool signal_ifvg_short = false
+
+if mod_ifvg
+    // Cálculo ATR
+    atr_val = nz(ta.atr(atr_len) * atr_mul, ta.cum(high - low) / (bar_index + 1))
+    
+    // Detección de Patrones FVG
+    fvg_up_cond = (low > high[2]) and (close[1] > high[2]) and (math.abs(low - high[2]) > atr_val)
+    fvg_down_cond = (high < low[2]) and (close[1] < low[2]) and (math.abs(low[2] - high) > atr_val)
+    
+    // Agregar nuevos FVGs
+    if fvg_up_cond
+        array.push(fvg_top, low)
+        array.push(fvg_bot, high[2])
+        array.push(fvg_mid, math.avg(low, high[2]))
+        array.push(fvg_is_bull, true)
+        array.push(fvg_left, bar_index - 1)
+        
+        if show_ifvg_boxes
+            b_box = box.new(bar_index - 1, low, bar_index, high[2], border_color=color.green, bgcolor=color.new(color.green, 90))
+            array.push(fvg_boxes, b_box)
+        else
+            array.push(fvg_boxes, box(na))
+    
+    if fvg_down_cond
+        array.push(fvg_top, low[2])
+        array.push(fvg_bot, high)
+        array.push(fvg_mid, math.avg(high, low[2]))
+        array.push(fvg_is_bull, false)
+        array.push(fvg_left, bar_index - 1)
+        
+        if show_ifvg_boxes
+            b_box = box.new(bar_index - 1, low[2], bar_index, high, border_color=color.red, bgcolor=color.new(color.red, 90))
+            array.push(fvg_boxes, b_box)
+        else
+            array.push(fvg_boxes, box(na))
+    
+    // Limpieza del buffer
+    if array.size(fvg_top) > buffer_size
+        array.shift(fvg_top)
+        array.shift(fvg_bot)
+        array.shift(fvg_mid)
+        array.shift(fvg_is_bull)
+        array.shift(fvg_left)
+        b_del = array.shift(fvg_boxes)
+        if not na(b_del)
+            box.delete(b_del)
+    
+    // Actualizar cajas
+    if show_ifvg_boxes and array.size(fvg_boxes) > 0
+        for i = 0 to array.size(fvg_boxes) - 1
+            b_curr = array.get(fvg_boxes, i)
+            if not na(b_curr)
+                box.set_right(b_curr, bar_index)
+    
+    // Detección de inversiones
+    if array.size(fvg_top) > 0
+        for i = array.size(fvg_top) - 1 to 0
+            mid = array.get(fvg_mid, i)
+            is_bull = array.get(fvg_is_bull, i)
+            
+            if not is_bull
+                if close > mid and close[1] <= mid
+                    signal_ifvg_long := true
+            
+            if is_bull
+                if close < mid and close[1] >= mid
+                    signal_ifvg_short := true
+
+//═════════════════════════════════════════════════════════════════════════════
+// 10. MÓDULO LIQUIDATION - LÓGICA
+//═════════════════════════════════════════════════════════════════════════════
+
+bool signal_liq_long = false
+bool signal_liq_short = false
+bool is_short_liq = false
+bool is_long_liq = false
+float st_val = na
+float st_dir = 0
+
+if mod_liq
+    vol_up = close >= open ? volume : 0.0
+    vol_down = close < open ? volume : 0.0
+    
+    mean_u = ta.sma(vol_up, z_len)
+    std_u = ta.stdev(vol_up, z_len)
+    z_u = std_u != 0 ? (vol_up - mean_u) / std_u : 0.0
+    
+    mean_d = ta.sma(vol_down, z_len)
+    std_d = ta.stdev(vol_down, z_len)
+    z_d = std_d != 0 ? (vol_down - mean_d) / std_d : 0.0
+    
+    [st_val_temp, st_dir_temp] = ta.supertrend(2, 10)
+    st_val := st_val_temp
+    st_dir := st_dir_temp
+    
+    bool st_changed = st_dir != st_dir[1]
+    
+    is_short_liq := (st_dir == 1) and (z_u > z_thresh)
+    is_long_liq := (st_dir == -1) and (z_d > z_thresh)
+    
+    var int bars_since_short_liq = 999999
+    var int bars_since_long_liq = 999999
+    
+    if is_short_liq
+        bars_since_short_liq := 0
+    else
+        bars_since_short_liq += 1
+    
+    if is_long_liq
+        bars_since_long_liq := 0
+    else
+        bars_since_long_liq += 1
+    
+    if bars_since_short_liq <= liq_timeout and st_changed and st_dir == -1
+        signal_liq_long := true
+    
+    if bars_since_long_liq <= liq_timeout and st_changed and st_dir == 1
+        signal_liq_short := true
+
+//═════════════════════════════════════════════════════════════════════════════
+// 11. MÓDULO VOLUME PROFILE - LÓGICA
+//═════════════════════════════════════════════════════════════════════════════
+
+nzV = nz(volume)
+float poc = na
+float vaH = na
+float vaL = na
+
+if mod_vp
+    // Calcular rango de precios
+    if bar_index == last_bar_index - vpLN
+        VP_sI := bar_index
+        pLST := low 
+        pHST := high
+    else if bar_index > last_bar_index - vpLN
+        pLST := math.min(low, nz(pLST, low))
+        pHST := math.max(high, nz(pHST, high))
+    
+    // Recolectar datos
+    if barstate.ishistory and (bar_index >= last_bar_index - vpLN) and bar_index < last_bar_index
+        array.push(bD_bh, high)
+        array.push(bD_bl, low)
+        array.push(bD_bv, volume)
+        array.push(bD_bp, close > open)
+    
+    pSTP = nz(pHST, high) > nz(pLST, low) ? (nz(pHST, high) - nz(pLST, low)) / vpNR : 0.001
+    
+    // Calcular VP en última barra
+    if barstate.islast
+        // Limpiar cajas anteriores
+        if array.size(VP_boxes) > 0
+            for i = 0 to array.size(VP_boxes) - 1
+                box.delete(array.get(VP_boxes, i))
+            array.clear(VP_boxes)
+        
+        // Agregar barra actual
+        array.push(bD_bh, high)
+        array.push(bD_bl, low)
+        array.push(bD_bv, volume)
+        array.push(bD_bp, close > open)
+        
+        // Reset arrays de volumen
+        for j = 0 to vpNR - 1
+            array.set(vD_vt, j, 0.0)
+            array.set(vD_vb, j, 0.0)
+        
+        // Calcular volumen por nivel
+        aSZ = array.size(bD_bv)
+        if aSZ > 0 and pSTP > 0
+            for aI = 0 to aSZ - 1
+                lH = array.get(bD_bh, aI)
+                lL = array.get(bD_bl, aI)
+                lV = array.get(bD_bv, aI)
+                lP = array.get(bD_bp, aI)
+                
+                for i = 0 to vpNR - 1
+                    pLL = nz(pLST, low) + i * pSTP
+                    pLH = pLL + pSTP
+                    
+                    if lH >= pLL and lL < pLH
+                        vPOR = 1.0
+                        if lL >= pLL and lH > pLH
+                            vPOR := (pLH - lL) / math.max(lH - lL, 0.0001)
+                        else if lH <= pLH and lL < pLL
+                            vPOR := (lH - pLL) / math.max(lH - lL, 0.0001)
+                        else if lL >= pLL and lH <= pLH
+                            vPOR := 1.0
+                        else
+                            vPOR := pSTP / math.max(lH - lL, 0.0001)
+                        
+                        array.set(vD_vt, i, array.get(vD_vt, i) + lV * vPOR)
+                        if lP
+                            array.set(vD_vb, i, array.get(vD_vb, i) + lV * vPOR)
+        
+        // Encontrar POC y Value Area
+        VP_pcL := array.indexof(vD_vt, array.max(vD_vt))
+        if VP_pcL < 0
+            VP_pcL := 0
+        
+        ttV = array.sum(vD_vt) * 0.68
+        va = array.get(vD_vt, VP_pcL)
+        VP_laP := VP_pcL
+        VP_lbP := VP_pcL
+        
+        while va < ttV
+            if VP_lbP == 0 and VP_laP == vpNR - 1
+                break
+            
+            vaP = VP_laP < vpNR - 1 ? array.get(vD_vt, VP_laP + 1) : 0.0
+            vbP = VP_lbP > 0 ? array.get(vD_vt, VP_lbP - 1) : 0.0
+            
+            if vaP >= vbP
+                va += vaP
+                VP_laP += 1
+            else
+                va += vbP
+                VP_lbP -= 1
+        
+        vaH := nz(pLST, low) + (VP_laP + 1.0) * pSTP
+        poc := nz(pLST, low) + (VP_pcL + 0.5) * pSTP
+        vaL := nz(pLST, low) + (VP_lbP + 0.0) * pSTP
+        pLN = math.min(vpLN, 360)
+        
+        maxVt = array.max(vD_vt)
+        if maxVt <= 0
+            maxVt := 1.0
+        
+        // Dibujar líneas POC y VAH/VAL
+        if show_poc
+            line.new(x1=VP_sI, y1=poc, x2=last_bar_index, y2=poc, color=pocC, style=line.style_solid, width=2)
+        
+        if show_vah_val
+            lineX2 = int((pLN * vpWD + vpHO)) + last_bar_index
+            line.new(x1=VP_sI, y1=vaH, x2=lineX2, y2=vaH, color=vahC, style=line.style_solid, width=1)
+            line.new(x1=VP_sI, y1=vaL, x2=lineX2, y2=vaL, color=vahC, style=line.style_solid, width=1)
+        
+        // Dibujar barras del perfil
+        for i = 0 to vpNR - 1
+            vt_i = array.get(vD_vt, i)
+            vb_i = array.get(vD_vb, i)
+            
+            if vt_i > 0
+                // Barra Up
+                sBI = int((pLN * vpWD + vpHO)) + int(last_bar_index - vb_i / maxVt * pLN * vpWD)
+                eBI = int((pLN * vpWD + vpHO)) + last_bar_index
+                array.push(VP_boxes, box.new(sBI, nz(pLST, low) + (i + 0.1) * pSTP, eBI, nz(pLST, low) + (i + 0.9) * pSTP, color(na), bgcolor=vpUC))
+                
+                // Barra Down
+                sBI2 = sBI
+                eBI2 = sBI - int((vt_i - vb_i) / maxVt * pLN * vpWD)
+                array.push(VP_boxes, box.new(sBI2, nz(pLST, low) + (i + 0.1) * pSTP, eBI2, nz(pLST, low) + (i + 0.9) * pSTP, color(na), bgcolor=vpDC))
+
+//═════════════════════════════════════════════════════════════════════════════
+// 12. MÓDULO EMAs - LÓGICA Y VISUALIZACIÓN
+//═════════════════════════════════════════════════════════════════════════════
+
+float ema1 = na
+float ema2 = na
+float ema3 = na
+
+if mod_ema
+    ema1 := ta.ema(close, ema1_len)
+    ema2 := ta.ema(close, ema2_len)
+    ema3 := ta.ema(close, ema3_len)
+
+plot(mod_ema ? ema1 : na, "EMA Rápida", ema1_col, linewidth=1)
+plot(mod_ema ? ema2 : na, "EMA Media", ema2_col, linewidth=1)
+plot(mod_ema ? ema3 : na, "EMA Lenta", ema3_col, linewidth=2)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 13. MÓDULO VOLUME HISTOGRAM - LÓGICA
+//═════════════════════════════════════════════════════════════════════════════
+
+if mod_vhist
+    vhLP = vhPL == "Top"
+    pHSTv = ta.highest(high, math.min(vpLN, 496))
+    pLSTv = ta.lowest(low, math.min(vpLN, 496))
+    vHST = ta.highest(nzV, math.min(vpLN, 496))
+    
+    if barstate.islast and vHST > 0
+        // Limpiar líneas anteriores
+        if array.size(VH_lines) > 0
+            for i = 0 to array.size(VH_lines) - 1
+                line.delete(array.get(VH_lines, i))
+            array.clear(VH_lines)
+        
+        pCHR = (pHSTv - pLSTv) / math.max(pHSTv, 0.0001)
+        
+        for bI = 0 to math.min(vpLN, 300)
+            y1 = vhLP ? nz(pHST, high) + pHSTv * pCHR * vhVO : nz(pLST, low) - pLSTv * pCHR * vhVO
+            y2 = y1 * (1 + (vhLP ? 1 : -1) * nzV[bI] / math.max(vHST, 0.0001) * pCHR / vhHT)
+            
+            lCol = close[bI] > open[bI] ? vhUC : vhDC
+            newLine = line.new(x1=bar_index - bI, y1=y1, x2=bar_index - bI, y2=y2, color=lCol, style=line.style_solid, width=2)
+            array.push(VH_lines, newLine)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 14. SEÑALES COMBINADAS Y ALERTAS
+//═════════════════════════════════════════════════════════════════════════════
+
+// Filtro EMA (solo aplica si ambos módulos están activos)
+filter_long = (mod_ema and use_ema_filter and mod_ifvg) ? close > ema3 : true
+filter_short = (mod_ema and use_ema_filter and mod_ifvg) ? close < ema3 : true
+
+// Señales de entrada
+long_entry = ((mod_ifvg and signal_ifvg_long) or (mod_liq and signal_liq_long)) and filter_long
+short_entry = ((mod_ifvg and signal_ifvg_short) or (mod_liq and signal_liq_short)) and filter_short
+
+// Visualización de señales
+plotshape(long_entry, "Long", shape.labelup, location.belowbar, color.green, text="▲", textcolor=color.white, size=size.small)
+plotshape(short_entry, "Short", shape.labeldown, location.abovebar, color.red, text="▼", textcolor=color.white, size=size.small)
+
+// Visualización Liquidation
+plotshape(mod_liq and show_liq_signals and is_short_liq, "Short Liq Detected", shape.circle, location.abovebar, color.new(color.green, 50), size=size.tiny)
+plotshape(mod_liq and show_liq_signals and is_long_liq, "Long Liq Detected", shape.circle, location.belowbar, color.new(color.red, 50), size=size.tiny)
+plot(mod_liq and show_supertrend ? st_val : na, "SuperTrend", color=st_dir == 1 ? color.red : color.green)
+
+// Alertas
+alertcondition(long_entry, "🟢 Señal Long", "Señal de entrada Long detectada")
+alertcondition(short_entry, "🔴 Señal Short", "Señal de entrada Short detectada")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 15. TABLA DE ESTADO DE MÓDULOS
+//═════════════════════════════════════════════════════════════════════════════
+
+var table statusTable = table.new(position.top_left, 2, 6, bgcolor=color.new(color.gray, 90), border_width=1)
+
+if barstate.islast
+    table.cell(statusTable, 0, 0, "Módulo", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 70))
+    table.cell(statusTable, 1, 0, "Estado", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 70))
+    
+    table.cell(statusTable, 0, 1, "IFVG", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 1, mod_ifvg ? "✓ ON" : "✗ OFF", text_color=mod_ifvg ? color.green : color.gray, text_size=size.tiny)
+    
+    table.cell(statusTable, 0, 2, "Liquidación", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 2, mod_liq ? "✓ ON" : "✗ OFF", text_color=mod_liq ? color.green : color.gray, text_size=size.tiny)
+    
+    table.cell(statusTable, 0, 3, "Vol Profile", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 3, mod_vp ? "✓ ON" : "✗ OFF", text_color=mod_vp ? color.green : color.gray, text_size=size.tiny)
+    
+    table.cell(statusTable, 0, 4, "EMAs", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 4, mod_ema ? "✓ ON" : "✗ OFF", text_color=mod_ema ? color.green : color.gray, text_size=size.tiny)
+    
+    table.cell(statusTable, 0, 5, "Vol Histogram", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 5, mod_vhist ? "✓ ON" : "✗ OFF", text_color=mod_vhist ? color.green : color.gray, text_size=size.tiny)

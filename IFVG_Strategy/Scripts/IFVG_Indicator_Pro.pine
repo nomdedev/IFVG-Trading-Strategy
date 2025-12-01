@@ -1,0 +1,659 @@
+//@version=5
+indicator("IFVG Pro + Volume Profile", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 1. CONFIGURACION IFVG & LIQUIDATION
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_MAIN = "Configuración Principal"
+GRP_IFVG = "Lógica IFVG"
+GRP_LIQ  = "Lógica Liquidación"
+GRP_RISK = "Gestión de Riesgo"
+GRP_VIS  = "Visualización IFVG"
+
+// --- Activadores Visuales IFVG ---
+show_ifvg_vis = input.bool(true, "Ver IFVG Boxes", group = GRP_VIS, tooltip="Activa/desactiva la visualización de las cajas de Inversion Fair Value Gap. Las cajas verdes son FVGs alcistas y las rojas son bajistas.")
+show_liq_vis  = input.bool(true, "Ver Señales Liquidación", group = GRP_VIS, tooltip="Activa/desactiva la visualización de señales de liquidación (círculos sobre las velas) y la línea SuperTrend. Los círculos verdes indican posible liquidación de shorts, los rojos de longs.")
+
+// --- IFVG ---
+atr_len = input.int(300, "ATR Length", group = GRP_IFVG, tooltip="Número de barras para calcular el Average True Range (ATR). Este valor se usa para determinar el tamaño mínimo que debe tener un gap para ser considerado válido. Valores más altos suavizan el cálculo.")
+atr_mul = input.float(0.5, "ATR Multiplicador", step = 0.1, group = GRP_IFVG, tooltip="Multiplicador aplicado al ATR. Define qué tan grande debe ser el gap en relación al ATR para ser detectado. Valores más altos = gaps más grandes requeridos, menos señales pero más significativas.")
+buffer_size = input.int(20, "Memoria FVGs", group = GRP_IFVG, tooltip="Cantidad máxima de Fair Value Gaps a mantener en memoria. Los FVGs más antiguos se eliminan cuando se supera este límite. Valores más altos permiten monitorear más zonas pero consumen más recursos.")
+
+// --- EMAs ---
+use_ema_filter = input.bool(true, "Filtro EMA 200", group = GRP_MAIN, tooltip="Cuando está activado, solo permite señales LONG cuando el precio está por encima de la EMA 200 (tendencia alcista) y señales SHORT cuando está por debajo (tendencia bajista). Reduce señales falsas en contra de la tendencia principal.")
+ema1_len = input.int(50, "EMA Rápida", group = GRP_MAIN, tooltip="Período para la Media Móvil Exponencial rápida (línea azul). Reacciona rápidamente a cambios de precio. Útil para identificar momentum a corto plazo.")
+ema2_len = input.int(100, "EMA Media", group = GRP_MAIN, tooltip="Período para la Media Móvil Exponencial media (línea naranja). Proporciona una visión intermedia de la tendencia. Sirve como soporte/resistencia dinámico.")
+ema3_len = input.int(200, "EMA Lenta", group = GRP_MAIN, tooltip="Período para la Media Móvil Exponencial lenta (línea roja). Es la referencia principal para determinar la tendencia de largo plazo. Usada por el filtro de tendencia.")
+
+// --- Liquidation Signals ---
+z_len = input.int(200, "Z-Score Período", group = GRP_LIQ, tooltip="Número de barras para calcular la media y desviación estándar del volumen usado en el Z-Score. Valores más altos requieren picos de volumen más extremos para generar señales.")
+z_thresh = input.float(3.0, "Z-Score Umbral", step=0.1, group = GRP_LIQ, tooltip="Umbral del Z-Score para detectar picos de volumen anómalos. Un Z-Score de 3.0 significa que el volumen está 3 desviaciones estándar por encima del promedio (evento raro ~0.3% probabilidad). Valores más bajos = más señales.")
+liq_timeout = input.int(50, "Timeout Confirmación", group = GRP_LIQ, tooltip="Número máximo de barras para esperar la confirmación del SuperTrend después de detectar un pico de liquidación. Si el SuperTrend no cambia dentro de este período, la señal se descarta.")
+
+// --- Risk Management ---
+sl_pct = input.float(1.5, "Stop Loss %", step=0.1, group = GRP_RISK, tooltip="Porcentaje de Stop Loss referencial. Este valor es informativo y puede usarse como guía para establecer stops manuales. No ejecuta órdenes automáticamente.")
+tp_pct = input.float(3.0, "Take Profit %", step=0.1, group = GRP_RISK, tooltip="Porcentaje de Take Profit referencial. Este valor es informativo y puede usarse como guía para establecer targets manuales. No ejecuta órdenes automáticamente.")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 2. CONFIGURACION VOLUME PROFILE
+//═════════════════════════════════════════════════════════════════════════════
+
+vpGR = 'Volume & Sentiment Profile'
+
+vpTP   = 'Muestra la actividad total de trading (compra y venta) durante un período específico en cada nivel de precio.\n\n' +
+         'La longitud de las barras indica el volumen operado en cada nivel:\n' +
+         '• Zonas de alto volumen = áreas de consolidación (value areas)\n' +
+         '• Zonas de bajo volumen = áreas de supply/demand o liquidez'
+
+vpSH = input.bool(true, 'Volume Profile', group = vpGR, tooltip = vpTP)
+
+vpUC = input.color(color.new(#5d606b, 50), '  Up Volume ', inline = 'VP', group = vpGR, tooltip = "Color para el volumen de compra (barras alcistas). La porción de cada barra del perfil que representa transacciones en velas verdes.")
+vpDC = input.color(color.new(#d1d4dc, 50), 'Down Volume ', inline = 'VP', group = vpGR, tooltip = "Color para el volumen de venta (barras bajistas). La porción de cada barra del perfil que representa transacciones en velas rojas.")
+
+vaUC = input.color(color.new(#2962ff, 30), '  Value Area Up', inline = 'VA', group = vpGR, tooltip = "Color del volumen de compra dentro del Value Area. El Value Area es donde ocurrió el 68% (configurable) del volumen total.")
+vaDC = input.color(color.new(#fbc02d, 30), 'Value Area Down', inline = 'VA', group = vpGR, tooltip = "Color del volumen de venta dentro del Value Area. Destaca las transacciones bajistas en la zona de mayor actividad.")
+
+spTP   = 'Muestra el sentimiento dominante (compradores vs vendedores) en cada nivel de precio.\n\n' +
+         '• Barras alcistas (verde): actividad de compra dominante\n' +
+         '• Barras bajistas (rojo): actividad de venta dominante\n\n' +
+         'La longitud indica la fuerza del dominio de compradores/vendedores.'
+
+spSH = input.bool(true, 'Sentiment Profile', group = vpGR, tooltip = spTP)
+spUC = input.color(color.new(#26a69a, 30), '  Bullish', inline = 'BB', group = vpGR, tooltip = "Color para niveles donde los compradores dominan. Indica presión compradora y posibles zonas de soporte.")
+spDC = input.color(color.new(#ef5350, 30), 'Bearish', inline = 'BB', group = vpGR, tooltip = "Color para niveles donde los vendedores dominan. Indica presión vendedora y posibles zonas de resistencia.")
+
+sdTT = 'Identifica zonas de supply (oferta) y demand (demanda) basadas en niveles de bajo volumen.\n\n' +
+       '• Supply Zones (rojo): niveles sobre el POC con poco volumen, posible resistencia\n' +
+       '• Demand Zones (azul): niveles bajo el POC con poco volumen, posible soporte\n\n' +
+       'Estas zonas suelen actuar como puntos de reversión cuando el precio las alcanza.'
+
+sdSH = input.bool(true, 'Supply & Demand Zones', group = vpGR, tooltip = sdTT)
+sdTH = input.int(15, '  S&D Threshold %', minval = 0, maxval = 41, group = vpGR, tooltip = "Umbral porcentual para identificar zonas de bajo volumen. Los niveles con volumen menor a este % del máximo se marcan como supply/demand. Valores más bajos = zonas más extremas.") / 100.0
+sdSC = input.color(color.new(#ec1313, 80), '  Supply', inline = 'SD', group = vpGR, tooltip = "Color para las zonas de Supply (oferta). Áreas de bajo volumen sobre el POC donde puede haber presión vendedora.")
+sdDC = input.color(color.new(#0094FF, 80), 'Demand', inline = 'SD', group = vpGR, tooltip = "Color para las zonas de Demand (demanda). Áreas de bajo volumen bajo el POC donde puede haber presión compradora.")
+
+pcSH = input.string('Last (Line)', 'Point of Control (POC)', options = ['Last (Line)', 'None'], inline = 'POC', group = vpGR, tooltip = "El POC es el nivel de precio con mayor volumen operado.\n\n• Last (Line): Muestra el POC final como línea horizontal\n• None: No muestra el POC\n\nEl POC actúa como imán del precio y zona de valor justo.")
+pocC = input.color(#f44336, '', inline = 'POC', group = vpGR, tooltip = "Color de la línea del Point of Control.")
+pocW = input.int(2, '', minval = 1, inline = 'POC', group = vpGR, tooltip = "Grosor de la línea del Point of Control.")
+
+vpVA = input.float(68, 'Value Area (%)', minval = 0, maxval = 100, group = vpGR, tooltip = "Porcentaje del volumen total que define el Value Area. El estándar es 68% (1 desviación estándar). El Value Area representa la zona donde ocurrió la mayoría del trading, delimitada por VAH y VAL.") / 100.0
+
+vahS = input.bool(true, 'Value Area High (VAH)', inline = 'VAH', group = vpGR, tooltip = "Activa/desactiva la línea del Value Area High. El VAH es el límite superior del Value Area y suele actuar como resistencia. Precio sobre VAH indica fortaleza.")
+vahC = input.color(#2962ff, '', inline = 'VAH', group = vpGR, tooltip = "Color de la línea VAH.")
+vahW = input.int(1, '', minval = 1, inline = 'VAH', group = vpGR, tooltip = "Grosor de la línea VAH.")
+
+vlSH = input.bool(true, 'Value Area Low (VAL)', inline = 'VAL', group = vpGR, tooltip = "Activa/desactiva la línea del Value Area Low. El VAL es el límite inferior del Value Area y suele actuar como soporte. Precio bajo VAL indica debilidad.")
+valC = input.color(#2962ff, '', inline = 'VAL', group = vpGR, tooltip = "Color de la línea VAL.")
+valW = input.int(1, '', minval = 1, inline = 'VAL', group = vpGR, tooltip = "Grosor de la línea VAL.")
+
+spP1 = 'Bar Polarity'
+spP2 = 'Bar Buying/Selling Pressure'
+vpPT = input.string(spP1, 'Método de Polaridad', options = [spP1, spP2], group = vpGR, tooltip = "Método para clasificar el volumen como compra o venta:\n\n• Bar Polarity: Volumen Up si Close > Open, Down si Close <= Open\n• Buying/Selling Pressure: Up si (Close-Low) > (High-Close), Down en caso contrario\n\nEl segundo método es más preciso para detectar la presión real de compra/venta.")
+vsPT = vpPT == spP1
+
+vpLN_input = input.int(360, 'Período de Análisis', minval = 10, maxval = 5000, step = 10, group = vpGR, tooltip = "Número de barras históricas a incluir en el cálculo del Volume Profile. Valores más altos dan una visión de más largo plazo pero pueden ser menos relevantes para trading a corto plazo. Máximo recomendado: 1000-2000 barras.")
+
+vpST = input.bool(true, 'Mostrar Estadísticas', inline = 'STT', group = vpGR, tooltip = "Muestra una tabla con estadísticas del Volume Profile incluyendo: Profile High/Low, VAH, VAL, POC, Volumen Total, Volumen Promedio por barra y número de barras analizadas.")
+ppLS_str = input.string('Small', "Tamaño", options = ['Tiny', 'Small', 'Normal'], inline = 'STT', group = vpGR, tooltip = "Tamaño del texto en la tabla de estadísticas.")
+lcDB = input.string('Top Right', 'Posición', options = ['Top Right', 'Middle Right', 'Bottom Left'], inline = 'STT', group = vpGR, tooltip = "Posición de la tabla de estadísticas en el gráfico.")
+
+vpLV = input.bool(true, 'Mostrar Niveles de Precio', inline = 'BBe', group = vpGR, tooltip = "Muestra etiquetas con los precios exactos de los niveles importantes: Profile High, VAH, POC, VAL y Profile Low.")
+rpLS_str = input.string('Small', "Tamaño", options=['Tiny', 'Small', 'Normal'], inline = 'BBe', group = vpGR, tooltip = "Tamaño del texto en las etiquetas de niveles de precio.")
+
+vpPL = input.string('Right', 'Ubicación del Perfil', options = ['Right', 'Left'], group = vpGR, tooltip = "Posición del Volume Profile en el gráfico:\n\n• Right: A la derecha del precio actual (más común)\n• Left: A la izquierda, sobre las velas históricas")
+vpRT = vpPL == 'Right' 
+vpNR = input.int(100, 'Número de Filas', minval = 10, maxval = 150, step = 10, group = vpGR, tooltip = "Resolución vertical del Volume Profile. Más filas = mayor detalle pero puede verse más 'ruidoso'. Valores recomendados: 50-100 para la mayoría de casos.")
+vpWD = input.float(31, 'Ancho del Perfil', minval = 0, maxval = 250, group = vpGR, tooltip = "Ancho horizontal del Volume Profile expresado como porcentaje. Valores más altos hacen el perfil más ancho y fácil de ver, pero puede ocupar mucho espacio en el gráfico.") / 100.0
+vpHO = input.int(13, 'Offset Horizontal', maxval = 50, group = vpGR, tooltip = "Desplazamiento horizontal del Volume Profile respecto a la última barra. Ajusta la distancia entre el perfil y las velas actuales.")
+
+vaBG = input.bool(false, 'Fondo Value Area', inline = 'vBG', group = vpGR, tooltip = "Dibuja un rectángulo de fondo sombreado que cubre todo el Value Area (entre VAH y VAL). Útil para visualizar rápidamente la zona de valor.")
+vBGC = input.color(color.new(#2962ff, 89), '', inline = 'vBG', group = vpGR, tooltip = "Color del fondo del Value Area.")
+
+vpBG = input.bool(false, 'Fondo Rango Completo', inline = 'pBG', group = vpGR, tooltip = "Dibuja un rectángulo de fondo sombreado que cubre todo el rango del profile (de Profile Low a Profile High). Útil para ver el alcance total del análisis.")
+bgC  = input.color(color.new(#2962ff, 95), '', inline = 'pBG', group = vpGR, tooltip = "Color del fondo del rango completo.")
+
+// --- Color de Texto Personalizable (reemplaza chart.fg_color de v6) ---
+textColorGR = 'Colores de Interfaz'
+textColor = input.color(color.gray, 'Color de Texto', group = textColorGR, tooltip = "Color del texto para etiquetas y tablas. Ajústelo según su tema de TradingView (claro u oscuro) para mejor visibilidad. Gris funciona bien para ambos temas.")
+
+vhGR  = 'Volume Histogram'
+
+vhTT = 'Muestra el volumen de cada vela como barras verticales sobre o debajo del gráfico.\n\n' +
+       '• Barras verdes: velas alcistas (Close > Open)\n' +
+       '• Barras rojas: velas bajistas (Close < Open)\n\n' +
+       'La altura representa el volumen relativo al máximo del período.'
+
+vhSH = input.bool(true, 'Volume Histogram', group = vhGR, tooltip = vhTT)
+vmaL = input.int(21, 'MA Período', minval = 1, group = vhGR, tooltip = "Período de la Media Móvil del volumen usada para el cálculo de Volume Weighted Colored Bars. Un valor de 21 es estándar para identificar volumen anormal.")
+vhUC = input.color(color.new(#26a69a, 30), '  Alcista', inline='vol1', group = vhGR, tooltip = "Color de las barras del histograma cuando la vela es alcista (Close > Open).")
+vhDC = input.color(color.new(#ef5350, 30), 'Bajista', inline='vol1', group = vhGR, tooltip = "Color de las barras del histograma cuando la vela es bajista (Close < Open).")
+vhPL = input.string('Top', 'Posición', options = ['Top', 'Bottom'], group = vhGR, tooltip = "Ubicación del histograma de volumen:\n\n• Top: Sobre el gráfico, cerca de los máximos\n• Bottom: Debajo del gráfico, cerca de los mínimos")
+vhLP = vhPL  == 'Top'
+vhHT = 11 - input.int(8, 'Altura', minval = 1, maxval = 10, group = vhGR, tooltip = "Altura de las barras del histograma. Valores más altos hacen las barras más pequeñas, valores más bajos las hacen más prominentes.")
+vhVO = input.int(1, 'Offset Vertical', minval = 0, maxval = 20, group = vhGR, tooltip = "Separación vertical entre el histograma y los precios. Valores más altos alejan el histograma del gráfico de precios.") / 20.0
+
+cbGR = 'Volume Weighted Colored Bars'
+
+cbTT = 'Colorea las velas del gráfico según el volumen relativo a su media móvil:\n\n' +
+       '• Verde intenso / Rojo intenso: Volumen ALTO (sobre el umbral superior × MA)\n' +
+       '• Verde claro / Naranja: Volumen BAJO (bajo el umbral inferior × MA)\n' +
+       '• Sin color: Volumen normal\n\n' +
+       'Útil para identificar velas de alto interés (posibles reversiones o continuaciones fuertes).'
+
+vwcb = input.bool(false, 'Volume Weighted Colored Bars', group = cbGR, tooltip = cbTT)
+upTH = input.float(1.618, 'Umbral Superior', minval=1., step=.1, group = cbGR, tooltip = "Multiplicador del MA de volumen para considerar volumen ALTO. 1.618 (ratio áureo) es un buen valor estándar. Volumen > MA × este valor = vela de alto volumen.")
+dnTH = input.float(0.618, 'Umbral Inferior', minval=.1, step=.1, group = cbGR, tooltip = "Multiplicador del MA de volumen para considerar volumen BAJO. 0.618 (ratio áureo inverso) es un buen valor estándar. Volumen < MA × este valor = vela de bajo volumen.") 
+
+//═════════════════════════════════════════════════════════════════════════════
+// 3. VARIABLES VOLUME PROFILE (V5 Compatible - Arrays Planos)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Calcular vpLN
+var int vpLN = 0
+vpLN := last_bar_index < vpLN_input ? last_bar_index : vpLN_input - 1
+vpLN := math.max(vpLN, 10) // Mínimo 10 barras
+
+// Arrays para datos de barras (equivalente a barData UDT)
+var array<float> bD_bh = array.new_float(0)  // Bar Highs
+var array<float> bD_bl = array.new_float(0)  // Bar Lows
+var array<float> bD_bv = array.new_float(0)  // Bar Volumes
+var array<bool>  bD_bp = array.new_bool(0)   // Bar Polarity (true=bullish)
+var array<int>   bD_bn = array.new_int(0)    // Bar Numbers
+
+// Arrays para volumen por nivel (equivalente a volData UDT)
+var array<float> vD_vt = array.new_float(vpNR, 0.0)  // Total Volume por nivel
+var array<float> vD_vb = array.new_float(vpNR, 0.0)  // Bullish Volume por nivel
+var array<float> vD_vd = array.new_float(vpNR, 0.0)  // Delta (sentimiento) por nivel
+
+// Arrays para cajas del VP
+var array<box> VP_boxes = array.new_box(0)
+
+// Variables de estado VP
+var int VP_sI = 0     // Start Index
+var int VP_pcL = 0    // POC Level Index
+var int VP_laP = 0    // VAH Level Index
+var int VP_lbP = 0    // VAL Level Index
+
+var float pHST = na   // Profile High
+var float pLST = na   // Profile Low
+
+//═════════════════════════════════════════════════════════════════════════════
+// 4. FUNCIONES AUXILIARES (V5 Compatible)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Función para obtener el timeframe inferior óptimo para mayor precisión
+// (Nota: request.security_lower_tf requiere UDTs - se implementa en lógica de cálculo)
+f_getLowerTF() => 
+    int tfInMs = timeframe.in_seconds(timeframe.period)
+    int mInMS = 60
+
+    switch
+        tfInMs <                 30  =>  '1S'
+        tfInMs <          1 * mInMS  =>  '5S'
+        tfInMs <=        15 * mInMS  =>  '1'
+        tfInMs <=        60 * mInMS  =>  '5'
+        tfInMs <=       240 * mInMS  =>  '15'
+        tfInMs <=      1440 * mInMS  =>  '60'
+        => 'D'
+
+f_gTS(_t) =>
+    switch _t
+        'Tiny'   => size.tiny
+        'Small'  => size.small 
+        'Normal' => size.normal
+        => size.auto
+
+f_crossingLevelX(_price, _level) =>
+    (_level > _price and _level < _price[1]) or (_level < _price and _level > _price[1])
+
+// Función para obtener posición de tabla
+f_getTablePos(_pos) =>
+    switch _pos
+        'Top Right'    => position.top_right
+        'Middle Right' => position.middle_right 
+        'Bottom Left'  => position.bottom_left
+        => position.top_right
+
+//═════════════════════════════════════════════════════════════════════════════
+// 5. LÓGICA IFVG (INVERSION FAIR VALUE GAPS)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Arrays persistentes (Parallel Arrays)
+var array<float> fvg_top = array.new_float(0)
+var array<float> fvg_bot = array.new_float(0)
+var array<float> fvg_mid = array.new_float(0)
+var array<bool>  fvg_is_bull = array.new_bool(0)
+var array<int>   fvg_left = array.new_int(0)
+var array<box>   fvg_boxes = array.new_box(0)
+
+// Cálculo ATR
+atr_val = nz(ta.atr(atr_len) * atr_mul, ta.cum(high - low) / (bar_index + 1))
+
+// Detección de Patrones FVG
+fvg_up_cond = (low > high[2]) and (close[1] > high[2]) and (math.abs(low - high[2]) > atr_val)
+fvg_down_cond = (high < low[2]) and (close[1] < low[2]) and (math.abs(low[2] - high) > atr_val)
+
+// Agregar nuevos FVGs al array
+if fvg_up_cond
+    array.push(fvg_top, low)
+    array.push(fvg_bot, high[2])
+    array.push(fvg_mid, math.avg(low, high[2]))
+    array.push(fvg_is_bull, true)
+    array.push(fvg_left, bar_index - 1)
+    
+    if show_ifvg_vis
+        b_box = box.new(bar_index - 1, low, bar_index, high[2], border_color = color.green, bgcolor = color.new(color.green, 90))
+        array.push(fvg_boxes, b_box)
+    else
+        array.push(fvg_boxes, box(na))
+
+if fvg_down_cond
+    array.push(fvg_top, low[2])
+    array.push(fvg_bot, high)
+    array.push(fvg_mid, math.avg(high, low[2]))
+    array.push(fvg_is_bull, false)
+    array.push(fvg_left, bar_index - 1)
+    
+    if show_ifvg_vis
+        b_box = box.new(bar_index - 1, low[2], bar_index, high, border_color = color.red, bgcolor = color.new(color.red, 90))
+        array.push(fvg_boxes, b_box)
+    else
+        array.push(fvg_boxes, box(na))
+
+// Limpieza del buffer (FIFO)
+if array.size(fvg_top) > buffer_size
+    array.shift(fvg_top)
+    array.shift(fvg_bot)
+    array.shift(fvg_mid)
+    array.shift(fvg_is_bull)
+    array.shift(fvg_left)
+    b_del = array.shift(fvg_boxes)
+    if not na(b_del)
+        box.delete(b_del)
+
+// Actualizar cajas existentes
+if show_ifvg_vis and array.size(fvg_boxes) > 0
+    for i = 0 to array.size(fvg_boxes) - 1
+        b_curr = array.get(fvg_boxes, i)
+        if not na(b_curr)
+            box.set_right(b_curr, bar_index)
+
+// Detección de Inversiones (Señales)
+bool signal_ifvg_long = false
+bool signal_ifvg_short = false
+
+if array.size(fvg_top) > 0
+    for i = array.size(fvg_top) - 1 to 0
+        mid = array.get(fvg_mid, i)
+        is_bull = array.get(fvg_is_bull, i)
+        
+        if not is_bull
+            if close > mid and close[1] <= mid
+                signal_ifvg_long := true
+        
+        if is_bull
+            if close < mid and close[1] >= mid
+                signal_ifvg_short := true
+
+//═════════════════════════════════════════════════════════════════════════════
+// 6. LÓGICA LIQUIDATION SIGNALS (Z-SCORE + SUPERTREND)
+//═════════════════════════════════════════════════════════════════════════════
+
+vol_up = close >= open ? volume : 0.0
+vol_down = close < open ? volume : 0.0
+
+mean_u = ta.sma(vol_up, z_len)
+std_u = ta.stdev(vol_up, z_len)
+z_u = std_u != 0 ? (vol_up - mean_u) / std_u : 0.0
+
+mean_d = ta.sma(vol_down, z_len)
+std_d = ta.stdev(vol_down, z_len)
+z_d = std_d != 0 ? (vol_down - mean_d) / std_d : 0.0
+
+[st_val, st_dir] = ta.supertrend(2, 10)
+
+bool st_changed = st_dir != st_dir[1]
+
+is_short_liq = (st_dir == 1) and (z_u > z_thresh)
+is_long_liq = (st_dir == -1) and (z_d > z_thresh)
+
+var int bars_since_short_liq = 999999
+var int bars_since_long_liq = 999999
+
+if is_short_liq
+    bars_since_short_liq := 0
+else
+    bars_since_short_liq += 1
+
+if is_long_liq
+    bars_since_long_liq := 0
+else
+    bars_since_long_liq += 1
+
+bool signal_liq_long = false
+if bars_since_short_liq <= liq_timeout and st_changed and st_dir == -1
+    signal_liq_long := true
+
+bool signal_liq_short = false
+if bars_since_long_liq <= liq_timeout and st_changed and st_dir == 1
+    signal_liq_short := true
+
+//═════════════════════════════════════════════════════════════════════════════
+// 7. CALCULOS VOLUME PROFILE (V5 Compatible - Simplificado)
+//═════════════════════════════════════════════════════════════════════════════
+
+nzV  = nz(volume)
+vSMA = ta.sma(nzV, vmaL)
+
+rpS  = f_gTS(rpLS_str)
+ppLS = f_gTS(ppLS_str)
+tPOS = f_getTablePos(lcDB)
+
+// Calcular rango de precios
+if bar_index == last_bar_index - vpLN
+    VP_sI := bar_index
+    pLST := low 
+    pHST := high
+else if bar_index > last_bar_index - vpLN
+    pLST := math.min(low, nz(pLST, low))
+    pHST := math.max(high, nz(pHST, high))
+
+// Recolectar datos históricos
+if barstate.ishistory and (bar_index >= last_bar_index - vpLN) and bar_index < last_bar_index
+    array.push(bD_bh, high)
+    array.push(bD_bl, low)
+    array.push(bD_bv, volume)
+    
+    if vsPT
+        array.push(bD_bp, close > open)
+    else
+        array.push(bD_bp, (close - low) > (high - close))
+
+pSTP = nz(pHST, high) > nz(pLST, low) ? (nz(pHST, high) - nz(pLST, low)) / vpNR : 0.001
+
+// Calcular VP en última barra
+if barstate.islast and vpSH
+
+    // Limpiar cajas anteriores
+    if array.size(VP_boxes) > 0
+        for i = 0 to array.size(VP_boxes) - 1
+            box.delete(array.get(VP_boxes, i))
+        array.clear(VP_boxes)
+
+    // Agregar barra actual
+    array.push(bD_bh, high)
+    array.push(bD_bl, low)
+    array.push(bD_bv, volume)
+    if vsPT
+        array.push(bD_bp, close > open)
+    else
+        array.push(bD_bp, (close - low) > (high - close))
+
+    // Reset arrays de volumen
+    for j = 0 to vpNR - 1
+        array.set(vD_vt, j, 0.0)
+        array.set(vD_vb, j, 0.0)
+        array.set(vD_vd, j, 0.0)
+
+    // Calcular volumen por nivel
+    aSZ = array.size(bD_bv)
+    if aSZ > 0 and pSTP > 0
+        for aI = 0 to aSZ - 1
+            lH = array.get(bD_bh, aI)
+            lL = array.get(bD_bl, aI)
+            lV = array.get(bD_bv, aI)
+            lP = array.get(bD_bp, aI)
+
+            for i = 0 to vpNR - 1
+                pLL = nz(pLST, low) + i * pSTP
+                pLH = pLL + pSTP
+
+                if lH >= pLL and lL < pLH
+                    vPOR = 1.0
+                    if lL >= pLL and lH > pLH
+                        vPOR := (pLH - lL) / math.max(lH - lL, 0.0001)
+                    else if lH <= pLH and lL < pLL
+                        vPOR := (lH - pLL) / math.max(lH - lL, 0.0001)
+                    else if lL >= pLL and lH <= pLH
+                        vPOR := 1.0
+                    else
+                        vPOR := pSTP / math.max(lH - lL, 0.0001)
+
+                    array.set(vD_vt, i, array.get(vD_vt, i) + lV * vPOR)
+
+                    if lP
+                        array.set(vD_vb, i, array.get(vD_vb, i) + lV * vPOR)
+
+    // Calcular delta (sentimiento)
+    for i = 0 to vpNR - 1
+        bbp = 2 * array.get(vD_vb, i) - array.get(vD_vt, i)
+        array.set(vD_vd, i, math.abs(bbp))
+
+    // Encontrar POC y Value Area
+    VP_pcL := array.indexof(vD_vt, array.max(vD_vt))
+    if VP_pcL < 0
+        VP_pcL := 0
+    
+    ttV = array.sum(vD_vt) * vpVA
+    va = array.get(vD_vt, VP_pcL)
+    VP_laP := VP_pcL
+    VP_lbP := VP_pcL
+    
+    while va < ttV
+        if VP_lbP == 0 and VP_laP == vpNR - 1
+            break
+
+        vaP = 0.0
+        if VP_laP < vpNR - 1 
+            vaP := array.get(vD_vt, VP_laP + 1)
+
+        vbP = 0.0
+        if VP_lbP > 0
+            vbP := array.get(vD_vt, VP_lbP - 1)
+        
+        if vaP >= vbP
+            va  += vaP
+            VP_laP += 1
+        else
+            va  += vbP
+            VP_lbP -= 1
+
+    vaH = nz(pLST, low) + (VP_laP + 1.0) * pSTP
+    poc = nz(pLST, low) + (VP_pcL + 0.5) * pSTP
+    vaL = nz(pLST, low) + (VP_lbP + 0.0) * pSTP
+    pLN = math.min(vpLN, 360)
+
+    maxVt = array.max(vD_vt)
+    if maxVt <= 0
+        maxVt := 1.0
+
+    // Dibujar líneas
+    if vahS
+        lineX2 = vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index
+        line.new(x1=VP_sI, y1=vaH, x2=lineX2, y2=vaH, color=vahC, style=line.style_solid, width=vahW)
+    
+    if pcSH == 'Last (Line)'
+        line.new(x1=VP_sI, y1=poc, x2=last_bar_index, y2=poc, color=pocC, style=line.style_solid, width=pocW)
+
+    if vlSH
+        lineX2 = vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index
+        line.new(x1=VP_sI, y1=vaL, x2=lineX2, y2=vaL, color=valC, style=line.style_solid, width=valW)
+
+    if vaBG
+        array.push(VP_boxes, box.new(VP_sI, vaL, last_bar_index, vaH, vBGC, 1, line.style_dotted, bgcolor = vBGC))
+
+    if vpBG
+        array.push(VP_boxes, box.new(VP_sI, nz(pLST, low), last_bar_index, nz(pHST, high), bgC, 1, line.style_dotted, bgcolor = bgC))
+
+    // Dibujar labels
+    if vpLV
+        label.new(vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index, nz(pHST, high), 
+                 str.tostring(nz(pHST, high), format.mintick), color.new(color.gray, 89), 
+                 vpRT ? (not vpSH and not spSH ? label.style_label_left : label.style_label_down) : label.style_label_left, 
+                 color.gray, rpS, text.align_left, 'Profile High')
+
+        label.new(vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index, vaH, 
+                 str.tostring(vaH, format.mintick), color.new(vahC, 89), label.style_label_left, vahC, rpS, text.align_left, 'Value Area High')
+
+        label.new(vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index, poc, 
+                 str.tostring(poc, format.mintick), color.new(pocC, 89), label.style_label_left, pocC, rpS, text.align_left, 'Point of Control')
+
+        label.new(vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index, vaL, 
+                 str.tostring(vaL, format.mintick), color.new(valC, 89), label.style_label_left, valC, rpS, text.align_left, 'Value Area Low')
+
+        label.new(vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : spSH ? vpHO : 0) + last_bar_index : last_bar_index, nz(pLST, low), 
+                 str.tostring(nz(pLST, low), format.mintick), color.new(color.gray, 89), 
+                 vpRT ? (not vpSH and not spSH ? label.style_label_left : label.style_label_up) : label.style_label_left, 
+                 color.gray, rpS, text.align_left, 'Profile Low')
+
+    // Tabla de stats
+    if vpST
+        var table change = table.new(tPOS, 2, 10, border_width = 3)
+        tC = color.gray
+        table.cell(change, 0, 0, 'Profile High', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 0, str.tostring(nz(pHST, high), format.mintick), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 1, 'Value Area High', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 1, str.tostring(vaH, format.mintick), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 2, 'Point of Control', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 2, str.tostring(poc, format.mintick), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 3, 'Value Area Low', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 3, str.tostring(vaL, format.mintick), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 4, 'Profile Low', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 4, str.tostring(nz(pLST, low), format.mintick), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 5, 'Total Volume', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 5, str.tostring(array.sum(vD_vt), format.volume), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 6, 'Avg Volume/Bar', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 6, str.tostring(array.sum(vD_vt) / math.max(vpLN + 1, 1), format.volume), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 7, 'Volume MA (' + str.tostring(vmaL) + ')', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 7, str.tostring(vSMA, format.volume), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+        table.cell(change, 0, 8, 'Number of Bars', text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_left, text_size = ppLS)
+        table.cell(change, 1, 8, str.tostring(vpLN + 1), text_color = tC, bgcolor = color.new(tC, 80), text_halign = text.align_right, text_size = ppLS)
+
+    // Dibujar barras del perfil
+    for i = 0 to vpNR - 1
+        vt_i = array.get(vD_vt, i)
+        vb_i = array.get(vD_vb, i)
+        vd_i = array.get(vD_vd, i)
+        
+        if vpSH and vt_i > 0
+            // Barra Up
+            sBI = vpRT ? int((pLN * vpWD + vpHO)) + int(last_bar_index - vb_i / maxVt * pLN * vpWD) : VP_sI
+            eBI = vpRT ? int((pLN * vpWD + vpHO)) + last_bar_index : int(sBI + vb_i / maxVt * pLN * vpWD)
+            colUp = i >= VP_lbP and i <= VP_laP ? vaUC : vpUC
+            array.push(VP_boxes, box.new(sBI, nz(pLST, low) + (i + 0.1) * pSTP, eBI, nz(pLST, low) + (i + 0.9) * pSTP, color(na), bgcolor = colUp))
+
+            // Barra Down
+            sBI2 = vpRT ? sBI : eBI
+            eBI2 = vpRT ? sBI - int((vt_i - vb_i) / maxVt * pLN * vpWD) : sBI + int((vt_i - vb_i) / maxVt * pLN * vpWD)
+            colDn = i >= VP_lbP and i <= VP_laP ? vaDC : vpDC
+            array.push(VP_boxes, box.new(sBI2, nz(pLST, low) + (i + 0.1) * pSTP, eBI2, nz(pLST, low) + (i + 0.9) * pSTP, color(na), bgcolor = colDn))
+
+        if spSH and vt_i > 0
+            maxVd = array.max(vD_vd)
+            if maxVd <= 0
+                maxVd := 1.0
+            sBI = vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : vpHO) + int(last_bar_index + vd_i / maxVt * pLN * vpWD) : VP_sI
+            eBI = vpRT ? (vpSH ? int((pLN * vpWD + vpHO)) : vpHO) + last_bar_index : int(sBI - vd_i / maxVt * pLN * vpWD)
+
+            bbp = 2 * vb_i - vt_i
+            colSent = bbp > 0 ? spUC : spDC
+            array.push(VP_boxes, box.new(sBI, nz(pLST, low) + (i + 0.1) * pSTP, eBI, nz(pLST, low) + (i + 0.9) * pSTP, color(na), bgcolor = colSent))
+
+        if sdSH and vt_i / maxVt < sdTH
+            sdC = nz(pLST, low) + (i + 0.50) * pSTP > nz(pLST, low) + (VP_pcL + 0.5) * pSTP ? sdSC : sdDC
+            array.push(VP_boxes, box.new(bar_index - vpLN, nz(pLST, low) + (i + 1.0) * pSTP, bar_index, nz(pLST, low) + (i + 0.0) * pSTP, color(na), bgcolor = sdC))
+
+//═════════════════════════════════════════════════════════════════════════════
+// 8. VOLUME HISTOGRAM (V5 Compatible)
+//═════════════════════════════════════════════════════════════════════════════
+
+pHSTv = ta.highest(high, math.min(vpLN, 496))
+pLSTv = ta.lowest(low, math.min(vpLN, 496))
+vHST  = ta.highest(nzV, math.min(vpLN, 496))
+vMAR  = nzV / math.max(vSMA, 0.0001)
+
+var array<line> VH_lines = array.new_line(0)
+
+if barstate.islast and not na(nzV) and vhSH and vSMA > 0
+
+    // Limpiar líneas anteriores
+    if array.size(VH_lines) > 0
+        for i = 0 to array.size(VH_lines) - 1
+            line.delete(array.get(VH_lines, i))
+        array.clear(VH_lines)
+
+    pCHR = (pHSTv - pLSTv) / math.max(pHSTv, 0.0001)
+
+    for bI = 0 to math.min(vpLN, 499)
+        y1 = vhLP ? nz(pHST, high) + pHSTv * pCHR * vhVO : nz(pLST, low) - pLSTv * pCHR * vhVO
+        y2 = y1 * (1 + (vhLP ? 1 : -1) * nzV[bI] / math.max(vHST, 0.0001) * pCHR / vhHT)
+        
+        lCol = close[bI] > open[bI] ? vhUC : vhDC
+        newLine = line.new(x1=bar_index - bI, y1=y1, x2=bar_index - bI, y2=y2, color=lCol, style=line.style_solid, width=2)
+        array.push(VH_lines, newLine)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 9. VOLUME WEIGHTED COLORED BARS
+//═════════════════════════════════════════════════════════════════════════════
+
+barcolor(vwcb and not na(nzV) ? nzV > vSMA * upTH ? (open < close ? #006400 : #910000) : nzV < vSMA * dnTH ? (open < close ? #7FFFD4 : #FF9800) : na : na, title='Volume Weighted Colored Bars', editable = false)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 10. ALERTAS
+//═════════════════════════════════════════════════════════════════════════════
+
+poc_level = nz(pLST, low) + (VP_pcL + 0.50) * pSTP
+vah_level = nz(pLST, low) + (VP_laP + 1.00) * pSTP
+val_level = nz(pLST, low) + (VP_lbP + 0.00) * pSTP
+
+if f_crossingLevelX(close[1], poc_level) and pcSH != 'None'
+    alert(syminfo.ticker + ' price crossed POC line, price ' + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+if f_crossingLevelX(close[1], vah_level) and vahS
+    alert(syminfo.ticker + ' price crossed VAH line, price ' + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+if f_crossingLevelX(close[1], val_level) and vlSH
+    alert(syminfo.ticker + ' price crossed VAL line, price ' + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+if nzV > vSMA * upTH and (vwcb or vhSH)
+    alert(syminfo.ticker + ' high volume detected, price ' + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 11. VISUALIZACION IFVG & LIQUIDATION (FINAL)
+//═════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+ema1 = ta.ema(close, ema1_len)
+ema2 = ta.ema(close, ema2_len)
+ema3 = ta.ema(close, ema3_len)
+
+plot(ema1, "EMA 50", color.blue)
+plot(ema2, "EMA 100", color.orange)
+plot(ema3, "EMA 200", color.red, linewidth=2)
+
+// Filtro de Tendencia
+filter_long = use_ema_filter ? close > ema3 : true
+filter_short = use_ema_filter ? close < ema3 : true
+
+// Condiciones de Entrada Unificadas
+long_entry = (signal_ifvg_long or signal_liq_long) and filter_long
+short_entry = (signal_ifvg_short or signal_liq_short) and filter_short
+
+// Visualización de Señales de Entrada
+plotshape(long_entry, "Entrada Long", shape.labelup, location.belowbar, color.green, text="LONG", textcolor=color.white, size=size.small)
+plotshape(short_entry, "Entrada Short", shape.labeldown, location.abovebar, color.red, text="SHORT", textcolor=color.white, size=size.small)
+
+// Alertas IFVG
+alertcondition(long_entry, "Long Signal", "Señal de Entrada Long Detectada")
+alertcondition(short_entry, "Short Signal", "Señal de Entrada Short Detectada")
+
+// Visualización Liquidation Signals
+plotshape(show_liq_vis and is_short_liq, "Short Liq", shape.circle, location.abovebar, color.new(color.green, 50), size=size.tiny)
+plotshape(show_liq_vis and is_long_liq, "Long Liq", shape.circle, location.belowbar, color.new(color.red, 50), size=size.tiny)
+plot(show_liq_vis ? st_val : na, "SuperTrend", color = st_dir == 1 ? color.red : color.green)
+
+// Logo
+var table logo = table.new(position.bottom_right, 1, 1)
+if barstate.islast
+    table.cell(logo, 0, 0, '☼☾  ', text_size = size.normal, text_color = color.teal)

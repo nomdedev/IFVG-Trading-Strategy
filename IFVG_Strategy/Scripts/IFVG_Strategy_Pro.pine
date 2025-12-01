@@ -1,0 +1,337 @@
+//@version=6
+strategy("Estrategia IFVG Pro", overlay=true, process_orders_on_close=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, currency=currency.USD, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 1. CONFIGURACION
+//═════════════════════════════════════════════════════════════════════════════
+
+GRP_MAIN = "Configuración Principal"
+GRP_IFVG = "Lógica IFVG"
+GRP_LIQ  = "Lógica Liquidación"
+GRP_VP   = "Lógica Volume Profile"
+GRP_RISK = "Gestión de Riesgo"
+GRP_VIS  = "Visualización"
+
+// --- Activadores Visuales ---
+show_ifvg_vis = input.bool(true, "Ver IFVG Boxes", group = GRP_VIS, tooltip="Muestra u oculta las cajas de Inversion FVG en el gráfico.")
+show_liq_vis  = input.bool(true, "Ver Señales Liquidación", group = GRP_VIS, tooltip="Muestra u oculta las señales de liquidación (círculos) y el SuperTrend.")
+show_vp_vis   = input.bool(true, "Ver Volume Profile", group = GRP_VIS, tooltip="Muestra u oculta el Volume Profile en el lado derecho del gráfico.")
+
+// --- IFVG ---
+atr_len = input.int(300, "ATR Length", group = GRP_IFVG, tooltip="Longitud del ATR para calcular el tamaño mínimo del gap.")
+atr_mul = input.float(0.5, "ATR Multi", step = 0.1, group = GRP_IFVG, tooltip="Multiplicador del ATR. Un valor más alto requiere gaps más grandes.")
+buffer_size = input.int(20, "Memoria FVGs", group = GRP_IFVG, tooltip="Cantidad de FVGs recientes a monitorear.")
+
+// --- EMAs ---
+use_ema_filter = input.bool(true, "Filtro EMA 200", group = GRP_MAIN, tooltip="Si está activado, solo toma largos por encima de la EMA 200 y cortos por debajo.")
+ema1_len = input.int(50, "EMA 1", group = GRP_MAIN, tooltip="Periodo para la EMA rápida (Azul).")
+ema2_len = input.int(100, "EMA 2", group = GRP_MAIN, tooltip="Periodo para la EMA media (Naranja).")
+ema3_len = input.int(200, "EMA 3", group = GRP_MAIN, tooltip="Periodo para la EMA lenta (Roja). Usada para el filtro de tendencia.")
+
+// --- Liquidation Signals ---
+z_len = input.int(200, "Z-Score Length", group = GRP_LIQ, tooltip="Periodo para el cálculo del Z-Score del volumen.")
+z_thresh = input.float(3.0, "Z-Score Threshold", step=0.1, group = GRP_LIQ, tooltip="Umbral del Z-Score para detectar picos de volumen anómalos.")
+liq_timeout = input.int(50, "Timeout Confirmación", group = GRP_LIQ, tooltip="Barras máximas para esperar confirmación de SuperTrend.")
+
+// --- Volume Profile ---
+vp_lookback = input.int(300, "VP Historial", minval=50, maxval=2000, group = GRP_VP, tooltip="Cantidad de barras hacia atrás para calcular el perfil de volumen.")
+vp_bins     = input.int(50, "VP Resolución", minval=20, maxval=100, group = GRP_VP, tooltip="Resolución del perfil. Más bins = más detalle pero más 'ruido'.")
+c_vp_poc    = input.color(color.orange, "Color POC", group = GRP_VP, tooltip="Color de la barra con mayor volumen (Point of Control).")
+c_vp_bar    = input.color(color.new(color.blue, 50), "Color Barras", group = GRP_VP, tooltip="Color de las barras normales del perfil.")
+
+// --- Risk Management ---
+sl_pct = input.float(1.5, "Stop Loss %", step=0.1, group = GRP_RISK, tooltip="Porcentaje de Stop Loss desde el precio de entrada.")
+tp_pct = input.float(3.0, "Take Profit %", step=0.1, group = GRP_RISK, tooltip="Porcentaje de Take Profit desde el precio de entrada.")
+
+//═════════════════════════════════════════════════════════════════════════════
+// 2. LÓGICA IFVG (INVERSION FAIR VALUE GAPS)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Arrays persistentes (Parallel Arrays para evitar problemas de tipos)
+var fvg_top = array.new_float(0)
+var fvg_bot = array.new_float(0)
+var fvg_mid = array.new_float(0)
+var fvg_is_bull = array.new_bool(0)
+var fvg_left = array.new_int(0) // Para dibujo
+var fvg_boxes = array.new_box(0) // Para gestión de cajas
+
+// Cálculo ATR
+atr_val = nz(ta.atr(atr_len) * atr_mul, ta.cum(high - low) / (bar_index + 1))
+
+// Detección de Patrones FVG
+// Bullish FVG: Gap entre High[2] y Low[0]
+fvg_up_cond = (low > high[2]) and (close[1] > high[2]) and (math.abs(low - high[2]) > atr_val)
+// Bearish FVG: Gap entre Low[2] y High[0]
+fvg_down_cond = (high < low[2]) and (close[1] < low[2]) and (math.abs(low[2] - high) > atr_val)
+
+// Agregar nuevos FVGs al array
+if fvg_up_cond
+    array.push(fvg_top, low)
+    array.push(fvg_bot, high[2])
+    array.push(fvg_mid, math.avg(low, high[2]))
+    array.push(fvg_is_bull, true)
+    array.push(fvg_left, bar_index - 1)
+    
+    // Crear caja visual si está activado
+    if show_ifvg_vis
+        b = box.new(bar_index - 1, low, bar_index, high[2], border_color = color.green, bgcolor = color.new(color.green, 90))
+        array.push(fvg_boxes, b)
+    else
+        array.push(fvg_boxes, box(na))
+
+if fvg_down_cond
+    array.push(fvg_top, low[2])
+    array.push(fvg_bot, high)
+    array.push(fvg_mid, math.avg(high, low[2]))
+    array.push(fvg_is_bull, false)
+    array.push(fvg_left, bar_index - 1)
+    
+    // Crear caja visual si está activado
+    if show_ifvg_vis
+        b = box.new(bar_index - 1, low[2], bar_index, high, border_color = color.red, bgcolor = color.new(color.red, 90))
+        array.push(fvg_boxes, b)
+    else
+        array.push(fvg_boxes, box(na))
+
+// Limpieza del buffer (FIFO)
+if array.size(fvg_top) > buffer_size
+    array.shift(fvg_top)
+    array.shift(fvg_bot)
+    array.shift(fvg_mid)
+    array.shift(fvg_is_bull)
+    array.shift(fvg_left)
+    
+    // Eliminar caja visual asociada
+    b_del = array.shift(fvg_boxes)
+    if not na(b_del)
+        box.delete(b_del)
+
+// Actualizar cajas existentes (extender a la derecha)
+if show_ifvg_vis and array.size(fvg_boxes) > 0
+    for i = 0 to array.size(fvg_boxes) - 1
+        b = array.get(fvg_boxes, i)
+        if not na(b)
+            box.set_right(b, bar_index)
+
+// Detección de Inversiones (Señales)
+bool signal_ifvg_long = false
+bool signal_ifvg_short = false
+
+if array.size(fvg_top) > 0
+    // Iteramos inversamente para priorizar los más recientes
+    for i = array.size(fvg_top) - 1 to 0
+        mid = array.get(fvg_mid, i)
+        is_bull = array.get(fvg_is_bull, i)
+        
+        // Entrada Long: Precio cruza hacia arriba el Mid de un Bearish FVG
+        if not is_bull
+            if close > mid and close[1] <= mid
+                signal_ifvg_long := true
+        
+        // Entrada Short: Precio cruza hacia abajo el Mid de un Bullish FVG
+        if is_bull
+            if close < mid and close[1] >= mid
+                signal_ifvg_short := true
+
+//═════════════════════════════════════════════════════════════════════════════
+// 3. LÓGICA LIQUIDATION SIGNALS (Z-SCORE + SUPERTREND)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Cálculo Manual de Volumen Up/Down (Sin librerías)
+vol_up = close >= open ? volume : 0
+vol_down = close < open ? volume : 0
+
+// Cálculo Z-Score
+// Up Volume Z-Score
+mean_u = ta.sma(vol_up, z_len)
+std_u = ta.stdev(vol_up, z_len)
+z_u = std_u != 0 ? (vol_up - mean_u) / std_u : 0
+
+// Down Volume Z-Score
+mean_d = ta.sma(vol_down, z_len)
+std_d = ta.stdev(vol_down, z_len)
+z_d = std_d != 0 ? (vol_down - mean_d) / std_d : 0
+
+// SuperTrend (Factor 2, Periodo 10 como en original)
+[st_val, st_dir] = ta.supertrend(2, 10)
+// st_dir: 1 = Bajista, -1 = Alcista
+
+// Detectar cambio en SuperTrend
+bool st_changed = st_dir != st_dir[1]
+
+// Detección de Picos de Liquidación
+// Short Liquidation (Shorts atrapados/liquidándose) -> Volumen Up alto en tendencia bajista -> Posible reversión Alcista
+is_short_liq = (st_dir == 1) and (z_u > z_thresh)
+
+// Long Liquidation (Longs atrapados/liquidándose) -> Volumen Down alto en tendencia alcista -> Posible reversión Bajista
+is_long_liq = (st_dir == -1) and (z_d > z_thresh)
+
+// Máquina de Estados para Confirmación (Timeout)
+var int bars_since_short_liq = 999999
+var int bars_since_long_liq = 999999
+
+if is_short_liq
+    bars_since_short_liq := 0
+else
+    bars_since_short_liq += 1
+
+if is_long_liq
+    bars_since_long_liq := 0
+else
+    bars_since_long_liq += 1
+
+// Señales Confirmadas por Cambio de SuperTrend
+// Buscamos entrada Long si hubo Short Liq reciente y el SuperTrend cambia a Alcista (-1)
+bool signal_liq_long = false
+if bars_since_short_liq <= liq_timeout and st_changed and st_dir == -1
+    signal_liq_long := true
+
+// Buscamos entrada Short si hubo Long Liq reciente y el SuperTrend cambia a Bajista (1)
+bool signal_liq_short = false
+if bars_since_long_liq <= liq_timeout and st_changed and st_dir == 1
+    signal_liq_short := true
+
+//═════════════════════════════════════════════════════════════════════════════
+// 4. LÓGICA VOLUME PROFILE (VISUALIZACIÓN)
+//═════════════════════════════════════════════════════════════════════════════
+
+// Arrays persistentes para VP (Parallel Arrays)
+var vp_levels = array.new_float(0)
+var vp_indices = array.new_int(0)
+var vp_volumes = array.new_float(0)
+var vp_is_lower = array.new_bool(0)
+
+var volume_bins = array.new_float(vp_bins, 0.)
+
+if show_vp_vis
+    h = ta.highest(2)
+    l = ta.lowest(2)
+    
+    vol_sum = math.sum(volume, 10)
+    max_vol_hist = ta.highest(vol_sum, vp_lookback)
+    nVol   = vol_sum / math.max(max_vol_hist, 1) * 100
+    atr_hm = ta.atr(5) / 50
+    
+    level1 = high + atr_hm * nVol
+    level2 = low  - atr_hm * nVol
+    
+    if h == high 
+        array.push(vp_levels, level1)
+        array.push(vp_indices, bar_index)
+        array.push(vp_volumes, vol_sum)
+        array.push(vp_is_lower, false)
+
+    if l == low 
+        array.push(vp_levels, level2)
+        array.push(vp_indices, bar_index)
+        array.push(vp_volumes, vol_sum)
+        array.push(vp_is_lower, true)
+
+    // Limpieza de pivots invalidados
+    if array.size(vp_levels) > 0
+        for i = array.size(vp_levels) - 1 to 0
+            val = array.get(vp_levels, i)
+            is_l = array.get(vp_is_lower, i)
+            
+            if is_l and low < val 
+                array.remove(vp_levels, i)
+                array.remove(vp_indices, i)
+                array.remove(vp_volumes, i)
+                array.remove(vp_is_lower, i)
+            else if not is_l and high > val 
+                array.remove(vp_levels, i)
+                array.remove(vp_indices, i)
+                array.remove(vp_volumes, i)
+                array.remove(vp_is_lower, i)
+
+//═════════════════════════════════════════════════════════════════════════════
+// 5. FILTROS Y EJECUCIÓN
+//═════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+ema1 = ta.ema(close, ema1_len)
+ema2 = ta.ema(close, ema2_len)
+ema3 = ta.ema(close, ema3_len)
+
+plot(ema1, "EMA 50", color.blue)
+plot(ema2, "EMA 100", color.orange)
+plot(ema3, "EMA 200", color.red, linewidth=2)
+
+// Filtro de Tendencia
+filter_long = use_ema_filter ? close > ema3 : true
+filter_short = use_ema_filter ? close < ema3 : true
+
+// Condiciones de Entrada Unificadas
+long_entry = (signal_ifvg_long or signal_liq_long) and filter_long
+short_entry = (signal_ifvg_short or signal_liq_short) and filter_short
+
+if long_entry
+    strategy.entry("Long", strategy.long, comment = signal_liq_long ? "Liq Reversal" : "IFVG Inv")
+
+if short_entry
+    strategy.entry("Short", strategy.short, comment = signal_liq_short ? "Liq Reversal" : "IFVG Inv")
+
+// Gestión de Salida (SL/TP)
+if strategy.position_size > 0
+    strategy.exit("Exit Long", "Long", stop = strategy.position_avg_price * (1 - sl_pct/100), limit = strategy.position_avg_price * (1 + tp_pct/100))
+
+if strategy.position_size < 0
+    strategy.exit("Exit Short", "Short", stop = strategy.position_avg_price * (1 + sl_pct/100), limit = strategy.position_avg_price * (1 - tp_pct/100))
+
+//═════════════════════════════════════════════════════════════════════════════
+// 6. DIBUJADO (VISUALIZACIÓN)
+//═════════════════════════════════════════════════════════════════════════════
+
+// --- Visualización Liquidation Signals ---
+plotshape(show_liq_vis and is_short_liq, "Short Liq", shape.circle, location.abovebar, color.new(color.green, 50), size=size.tiny)
+plotshape(show_liq_vis and is_long_liq, "Long Liq", shape.circle, location.belowbar, color.new(color.red, 50), size=size.tiny)
+plot(show_liq_vis ? st_val : na, "SuperTrend", color = st_dir == 1 ? color.red : color.green)
+
+// --- Visualización Volume Profile (Solo en la última barra) ---
+// Calcular en cada barra para mantener consistencia de series
+h_max_series = ta.highest(high, vp_lookback)
+l_min_series = ta.lowest(low, vp_lookback)
+
+if show_vp_vis and barstate.islast
+    h_max = h_max_series
+    l_min = l_min_series
+    
+    if not na(h_max) and not na(l_min) and h_max > l_min
+        step = (h_max - l_min) / vp_bins
+        
+        // Reset bins
+        for j = 0 to vp_bins - 1
+            array.set(volume_bins, j, 0)
+        
+        // Acumular volumen en bins
+        if array.size(vp_levels) > 0
+            for i = 0 to array.size(vp_levels) - 1
+                lvl_val = array.get(vp_levels, i)
+                lvl_idx = array.get(vp_indices, i)
+                lvl_vol = array.get(vp_volumes, i)
+                
+                if bar_index - lvl_idx < vp_lookback
+                    j_idx = int((lvl_val - l_min) / step)
+                    if j_idx >= 0 and j_idx < vp_bins
+                        array.set(volume_bins, j_idx, array.get(volume_bins, j_idx) + lvl_vol)
+
+        // Dibujar
+        max_vol_bin = nz(array.max(volume_bins), 0)
+        
+        for j = 0 to vp_bins - 1
+            voll = array.get(volume_bins, j)
+            if voll > 0
+                lower = l_min + step * j
+                upper = lower + step
+                
+                valueVol = voll / math.max(max_vol_bin, 1) * 50
+                
+                is_poc = voll == max_vol_bin
+                col = is_poc ? c_vp_poc : c_vp_bar
+                
+                box.new(bar_index + 5, upper, bar_index + 5 + int(valueVol), lower, 
+                     bgcolor = col, 
+                     border_color = color.gray, 
+                     text = is_poc ? "POC" : "", 
+                     text_size = size.tiny,
+                     text_color = color.white)
