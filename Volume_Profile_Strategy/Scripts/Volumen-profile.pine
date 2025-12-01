@@ -386,8 +386,8 @@ if barstate.islast and ltfBD.size() > 0
     VP.laP := VP.pcL
     VP.lbP := VP.pcL
     
-    while va < ttV
-        if VP.lbP == 0 and VP.laP == vpNR - 1
+    for _ = 0 to 1000
+        if va >= ttV or (VP.lbP == 0 and VP.laP == vpNR - 1)
             break
 
         vaP = 0.
