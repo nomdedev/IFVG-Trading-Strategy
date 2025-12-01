@@ -419,8 +419,8 @@ if mod_vp
         VP_laP := VP_pcL
         VP_lbP := VP_pcL
         
-        while va < ttV
-            if VP_lbP == 0 and VP_laP == vpNR - 1
+        for _ = 0 to 1000
+            if va >= ttV or (VP_lbP == 0 and VP_laP == vpNR - 1)
                 break
             
             vaP = VP_laP < vpNR - 1 ? array.get(vD_vt, VP_laP + 1) : 0.0
