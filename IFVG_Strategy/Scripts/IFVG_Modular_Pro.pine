@@ -26,64 +26,57 @@ mod_vhist_input = input.bool(false, "📊 Módulo Vol Histogram", group=modGR, t
 // Contar módulos activos
 int mod_count = (mod_ifvg_input ? 1 : 0) + (mod_liq_input ? 1 : 0) + (mod_vp_input ? 1 : 0) + (mod_ema_input ? 1 : 0) + (mod_vhist_input ? 1 : 0)
 
-// Sistema de prioridad: Si hay más de 2, desactiva los de menor prioridad
+// Sistema de prioridad: Máximo 2 módulos activos
 // Prioridad: IFVG > VP > EMA > Liquidación > VHist
-bool mod_ifvg = mod_ifvg_input and mod_count <= 2 ? true : mod_ifvg_input and (mod_ifvg_input ? 1 : 0) <= 2
-bool mod_vp = mod_vp_input
-bool mod_ema = mod_ema_input
-bool mod_liq = mod_liq_input
-bool mod_vhist = mod_vhist_input
+bool mod_ifvg = false
+bool mod_vp = false
+bool mod_ema = false
+bool mod_liq = false
+bool mod_vhist = false
 
-// Recalcular con sistema de slots (máximo 2)
-var int slot1 = 0  // 1=IFVG, 2=VP, 3=EMA, 4=LIQ, 5=VHIST
-var int slot2 = 0
+// Recalcular slots en cada barra
+int slot1 = 0
+int slot2 = 0
 
-// Asignar slots por prioridad
-if barstate.isfirst
-    slot1 := 0
-    slot2 := 0
-    
-    if mod_ifvg_input
-        slot1 := 1
-    
-    if mod_vp_input
-        if slot1 == 0
-            slot1 := 2
-        else if slot2 == 0
-            slot2 := 2
-    
-    if mod_ema_input
-        if slot1 == 0
-            slot1 := 3
-        else if slot2 == 0
-            slot2 := 3
-    
-    if mod_liq_input
-        if slot1 == 0
-            slot1 := 4
-        else if slot2 == 0
-            slot2 := 4
-    
-    if mod_vhist_input
-        if slot1 == 0
-            slot1 := 5
-        else if slot2 == 0
-            slot2 := 5
+if mod_ifvg_input
+    slot1 = 1
+
+if mod_vp_input
+    if slot1 == 0
+        slot1 = 2
+    else if slot2 == 0
+        slot2 = 2
+
+if mod_ema_input
+    if slot1 == 0
+        slot1 = 3
+    else if slot2 == 0
+        slot2 = 3
+
+if mod_liq_input
+    if slot1 == 0
+        slot1 = 4
+    else if slot2 == 0
+        slot2 = 4
+
+if mod_vhist_input
+    if slot1 == 0
+        slot1 = 5
+    else if slot2 == 0
+        slot2 = 5
 
 // Estados finales de módulos
-mod_ifvg := slot1 == 1 or slot2 == 1
-mod_vp := slot1 == 2 or slot2 == 2
-mod_ema := slot1 == 3 or slot2 == 3
-mod_liq := slot1 == 4 or slot2 == 4
-mod_vhist := slot1 == 5 or slot2 == 5
+mod_ifvg = slot1 == 1 or slot2 == 1
+mod_vp = slot1 == 2 or slot2 == 2
+mod_ema = slot1 == 3 or slot2 == 3
+mod_liq = slot1 == 4 or slot2 == 4
+mod_vhist = slot1 == 5 or slot2 == 5
 
 // Mostrar advertencia si se excedió el límite
-var label warnLabel = na
 if barstate.islast and mod_count > 2
-    label.delete(warnLabel)
-    warnLabel := label.new(bar_index, high, "⚠️ Máx 2 módulos\nActivos: " + str.tostring(mod_count > 2 ? 2 : mod_count) + "/2", 
-                          color=color.new(color.orange, 20), style=label.style_label_down, 
-                          textcolor=color.white, size=size.small)
+    label.new(bar_index, high, "⚠️ Máx 2 módulos\nActivos: " + str.tostring(2) + "/2", 
+              color=color.new(color.orange, 20), style=label.style_label_down, 
+              textcolor=color.white, size=size.small)
 
 //═════════════════════════════════════════════════════════════════════════════
 // 2. CONFIGURACIÓN IFVG (Solo si módulo activo)
