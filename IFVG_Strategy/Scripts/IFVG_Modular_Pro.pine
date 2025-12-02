@@ -1,76 +1,18 @@
 //@version=5
-indicator("IFVG Modular Pro", "IFVG Pro ☼☾", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
+indicator("Modular Indy", "ProModules", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500, max_bars_back=5000)
 
 //═════════════════════════════════════════════════════════════════════════════
-// 1. SISTEMA DE MÓDULOS (Máximo 2 activos para optimización)
+// 1. SISTEMA DE MÓDULOS 
 //═════════════════════════════════════════════════════════════════════════════
 
 modGR = "🔧 Selector de Módulos"
 
-modTT = "⚠️ IMPORTANTE: Por razones de rendimiento, solo puede activar MÁXIMO 2 MÓDULOS a la vez.\n\n" +"Si activa más de 2, el sistema desactivará automáticamente los excedentes.\n\n" +
-        "Módulos disponibles:\n" +"• IFVG: Detecta Inversion Fair Value Gaps\n" +"• Liquidación: Señales de liquidación con Z-Score\n" +"• Volume Profile: Perfil de volumen por precio\n" +"• EMAs: Medias móviles exponenciales\n" +"• Vol Histogram: Histograma de volumen"
-
 // Inputs de módulos
-mod_ifvg_input = input.bool(true, "📊 Módulo IFVG", group=modGR, tooltip="Detecta Inversion Fair Value Gaps (zonas donde el precio invierte tras llenar un gap). Muestra cajas verdes (alcistas) y rojas (bajistas) en el gráfico.")
-mod_liq_input = input.bool(false, "💧 Módulo Liquidación", group=modGR, tooltip="Detecta picos de volumen anómalos (Z-Score) combinados con cambios de SuperTrend para identificar posibles eventos de liquidación masiva.")
-mod_vp_input = input.bool(true, "📈 Módulo Volume Profile", group=modGR, tooltip="Muestra el perfil de volumen por niveles de precio. Incluye POC, Value Area, zonas de Supply/Demand. Consume más recursos.")
-mod_ema_input = input.bool(false, "📉 Módulo EMAs", group=modGR, tooltip="Muestra 3 EMAs (50, 100, 200) para análisis de tendencia. Puede usarse como filtro para las señales IFVG.")
-mod_vhist_input = input.bool(false, "📊 Módulo Vol Histogram", group=modGR, tooltip="Histograma de volumen superpuesto en el gráfico. Muestra el volumen de cada vela como barras verticales.")
-
-// Contar módulos activos
-int mod_count = (mod_ifvg_input ? 1 : 0) + (mod_liq_input ? 1 : 0) + (mod_vp_input ? 1 : 0) + (mod_ema_input ? 1 : 0) + (mod_vhist_input ? 1 : 0)
-
-// Sistema de prioridad: Máximo 2 módulos activos
-// Prioridad: IFVG > VP > EMA > Liquidación > VHist
-bool mod_ifvg = false
-bool mod_vp = false
-bool mod_ema = false
-bool mod_liq = false
-bool mod_vhist = false
-
-// Recalcular slots en cada barra
-int slot1 = 0
-int slot2 = 0
-
-if mod_ifvg_input
-    slot1 := 1
-
-if mod_vp_input
-    if slot1 == 0
-        slot1 := 2
-    else if slot2 == 0
-        slot2 := 2
-
-if mod_ema_input
-    if slot1 == 0
-        slot1 := 3
-    else if slot2 == 0
-        slot2 := 3
-
-if mod_liq_input
-    if slot1 == 0
-        slot1 := 4
-    else if slot2 == 0
-        slot2 := 4
-
-if mod_vhist_input
-    if slot1 == 0
-        slot1 := 5
-    else if slot2 == 0
-        slot2 := 5
-
-// Estados finales de módulos
-mod_ifvg := slot1 == 1 or slot2 == 1
-mod_vp := slot1 == 2 or slot2 == 2
-mod_ema := slot1 == 3 or slot2 == 3
-mod_liq := slot1 == 4 or slot2 == 4
-mod_vhist := slot1 == 5 or slot2 == 5
-
-// Mostrar advertencia si se excedió el límite
-if barstate.islast and mod_count > 2
-    label.new(bar_index, high, "⚠️ Máx 2 módulos\nActivos: " + str.tostring(2) + "/2", 
-              color=color.new(color.orange, 20), style=label.style_label_down, 
-              textcolor=color.white, size=size.small)
+mod_ifvg = input.bool(false, "📊 Módulo IFVG", group=modGR, tooltip="Detecta Inversion Fair Value Gaps (zonas donde el precio invierte tras llenar un gap). Muestra cajas verdes (alcistas) y rojas (bajistas) en el gráfico.")
+mod_liq = input.bool(false, "💧 Módulo Liquidación", group=modGR, tooltip="Detecta picos de volumen anómalos (Z-Score) combinados con cambios de SuperTrend para identificar posibles eventos de liquidación masiva.")
+mod_vp = input.bool(true, "📈 Módulo Volume Profile", group=modGR, tooltip="Muestra el perfil de volumen por niveles de precio. Incluye POC, Value Area, zonas de Supply/Demand. Consume más recursos.")
+mod_ema = input.bool(true, "📉 Módulo EMAs", group=modGR, tooltip="Muestra 3 EMAs (20, 50, 200) para análisis de tendencia. Puede usarse como filtro para las señales IFVG.")
+mod_vhist = input.bool(false, "📊 Módulo Vol Histogram", group=modGR, tooltip="Histograma de volumen superpuesto en el gráfico. Muestra el volumen de cada vela como barras verticales.")
 
 //═════════════════════════════════════════════════════════════════════════════
 // 2. CONFIGURACIÓN IFVG (Solo si módulo activo)
@@ -125,13 +67,13 @@ vahC = input.color(#2962ff, "VAH/VAL Color", group=GRP_VP)
 
 GRP_EMA = "📉 EMAs - Configuración"
 
-ema1_len = input.int(50, "EMA Rápida", minval=5, maxval=100, group=GRP_EMA, tooltip="Período de la EMA rápida. Reacciona rápido a cambios de precio.")
-ema2_len = input.int(100, "EMA Media", minval=20, maxval=200, group=GRP_EMA, tooltip="Período de la EMA media. Balance entre velocidad y estabilidad.")
-ema3_len = input.int(200, "EMA Lenta", minval=50, maxval=400, group=GRP_EMA, tooltip="Período de la EMA lenta. Define la tendencia principal.")
+ema1_len = input.int(20, "EMA 20", minval=5, maxval=100, group=GRP_EMA, tooltip="EMA de 20 períodos. Reacciona rápido a cambios de precio.")
+ema2_len = input.int(50, "EMA 50", minval=20, maxval=200, group=GRP_EMA, tooltip="EMA de 50 períodos. Balance entre velocidad y estabilidad.")
+ema3_len = input.int(200, "EMA 200", minval=50, maxval=400, group=GRP_EMA, tooltip="EMA de 200 períodos. Define la tendencia principal.")
 
-ema1_col = input.color(color.blue, "Color EMA Rápida", group=GRP_EMA)
-ema2_col = input.color(color.orange, "Color EMA Media", group=GRP_EMA)
-ema3_col = input.color(color.red, "Color EMA Lenta", group=GRP_EMA)
+ema1_col = input.color(color.red, "Color EMA 20", group=GRP_EMA)
+ema2_col = input.color(color.blue, "Color EMA 50", group=GRP_EMA)
+ema3_col = input.color(color.yellow, "Color EMA 200", group=GRP_EMA)
 
 use_ema_filter = input.bool(true, "Usar como Filtro IFVG", group=GRP_EMA, tooltip="Si está activo, IFVG solo dará señales LONG sobre EMA lenta y SHORT bajo EMA lenta.")
 
@@ -340,7 +282,7 @@ if mod_vp
         pLST := math.min(low, nz(pLST, low))
         pHST := math.max(high, nz(pHST, high))
     
-    // Recolectar datos
+    // Recolectar datos en historial
     if barstate.ishistory and (bar_index >= last_bar_index - vpLN) and bar_index < last_bar_index
         array.push(bD_bh, high)
         array.push(bD_bl, low)
@@ -349,8 +291,8 @@ if mod_vp
     
     pSTP = nz(pHST, high) > nz(pLST, low) ? (nz(pHST, high) - nz(pLST, low)) / vpNR : 0.001
     
-    // Calcular VP en última barra
-    if barstate.islast
+    // Calcular VP en última barra o cuando se confirma
+    if barstate.islast or barstate.isconfirmed
         // Limpiar cajas anteriores
         if array.size(VP_boxes) > 0
             for i = 0 to array.size(VP_boxes) - 1
@@ -467,9 +409,9 @@ if mod_ema
     ema2 := ta.ema(close, ema2_len)
     ema3 := ta.ema(close, ema3_len)
 
-plot(mod_ema ? ema1 : na, "EMA Rápida", ema1_col, linewidth=1)
-plot(mod_ema ? ema2 : na, "EMA Media", ema2_col, linewidth=1)
-plot(mod_ema ? ema3 : na, "EMA Lenta", ema3_col, linewidth=2)
+plot(mod_ema ? ema1 : na, "EMA 20", ema1_col, linewidth=4)
+plot(mod_ema ? ema2 : na, "EMA 50", ema2_col, linewidth=4)
+plot(mod_ema ? ema3 : na, "EMA 200", ema3_col, linewidth=4)
 
 //═════════════════════════════════════════════════════════════════════════════
 // 13. MÓDULO VOLUME HISTOGRAM - LÓGICA
@@ -481,7 +423,7 @@ if mod_vhist
     pLSTv = ta.lowest(low, math.min(vpLN, 496))
     vHST = ta.highest(nzV, math.min(vpLN, 496))
     
-    if barstate.islast and vHST > 0
+    if (barstate.islast or barstate.isconfirmed) and vHST > 0
         // Limpiar líneas anteriores
         if array.size(VH_lines) > 0
             for i = 0 to array.size(VH_lines) - 1
@@ -527,7 +469,7 @@ alertcondition(short_entry, "🔴 Señal Short", "Señal de entrada Short detect
 // 15. TABLA DE ESTADO DE MÓDULOS
 //═════════════════════════════════════════════════════════════════════════════
 
-var table statusTable = table.new(position.top_left, 2, 6, bgcolor=color.new(color.gray, 90), border_width=1)
+var table statusTable = table.new(position.bottom_right, 2, 6, bgcolor=color.new(color.gray, 90), border_width=1)
 
 if barstate.islast
     table.cell(statusTable, 0, 0, "Módulo", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.blue, 70))
