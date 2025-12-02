@@ -48,8 +48,8 @@ vpTP = "El Volume Profile muestra la actividad de trading por nivel de precio.\n
        "• Zonas de bajo volumen = supply/demand zones\n" +
        "• POC = nivel con mayor volumen"
 
-vpLN_input = input.int(360, "Período de Análisis", minval=50, maxval=2000, step=10, group=GRP_VP, tooltip="Número de barras históricas para el cálculo. Más barras = visión de largo plazo pero más lento.")
-vpNR = input.int(80, "Número de Filas", minval=20, maxval=120, step=10, group=GRP_VP, tooltip="Resolución vertical. Más filas = mayor detalle pero más pesado.")
+vpLN_input = input.int(100, "Período de Análisis", minval=20, maxval=500, step=10, group=GRP_VP, tooltip="Número de barras históricas para el cálculo. Más barras = visión de largo plazo pero más lento. Recomendado: 100-200.")
+vpNR = input.int(40, "Número de Filas", minval=10, maxval=80, step=5, group=GRP_VP, tooltip="Resolución vertical. Más filas = mayor detalle pero más lento. Recomendado: 30-50.")
 vpWD = input.float(25, "Ancho del Perfil", minval=5, maxval=100, group=GRP_VP, tooltip="Ancho visual del perfil de volumen.") / 100.0
 vpHO = input.int(10, "Offset Horizontal", minval=0, maxval=30, group=GRP_VP, tooltip="Separación del perfil respecto a las velas.")
 
@@ -291,8 +291,8 @@ if mod_vp
     
     pSTP = nz(pHST, high) > nz(pLST, low) ? (nz(pHST, high) - nz(pLST, low)) / vpNR : 0.001
     
-    // Calcular VP en última barra o cuando se confirma
-    if barstate.islast or barstate.isconfirmed
+    // Calcular VP solo en última barra (optimización de rendimiento)
+    if barstate.islast
         // Limpiar cajas anteriores
         if array.size(VP_boxes) > 0
             for i = 0 to array.size(VP_boxes) - 1
@@ -310,8 +310,8 @@ if mod_vp
             array.set(vD_vt, j, 0.0)
             array.set(vD_vb, j, 0.0)
         
-        // Calcular volumen por nivel
-        aSZ = array.size(bD_bv)
+        // Calcular volumen por nivel (limitado para rendimiento)
+        aSZ = math.min(array.size(bD_bv), vpLN_input)
         if aSZ > 0 and pSTP > 0
             for aI = 0 to aSZ - 1
                 lH = array.get(bD_bh, aI)
@@ -348,7 +348,7 @@ if mod_vp
         VP_laP := VP_pcL
         VP_lbP := VP_pcL
         
-        for _ = 0 to 1000
+        for _ = 0 to vpNR
             if va >= ttV or (VP_lbP == 0 and VP_laP == vpNR - 1)
                 break
             
@@ -419,11 +419,12 @@ plot(mod_ema ? ema3 : na, "EMA 200", ema3_col, linewidth=4)
 
 if mod_vhist
     vhLP = vhPL == "Top"
-    pHSTv = ta.highest(high, math.min(vpLN, 496))
-    pLSTv = ta.lowest(low, math.min(vpLN, 496))
-    vHST = ta.highest(nzV, math.min(vpLN, 496))
+    vhLN = math.min(vpLN, 100)  // Limitar a 100 barras máximo
+    pHSTv = ta.highest(high, vhLN)
+    pLSTv = ta.lowest(low, vhLN)
+    vHST = ta.highest(nzV, vhLN)
     
-    if (barstate.islast or barstate.isconfirmed) and vHST > 0
+    if barstate.islast and vHST > 0
         // Limpiar líneas anteriores
         if array.size(VH_lines) > 0
             for i = 0 to array.size(VH_lines) - 1
@@ -432,7 +433,7 @@ if mod_vhist
         
         pCHR = (pHSTv - pLSTv) / math.max(pHSTv, 0.0001)
         
-        for bI = 0 to math.min(vpLN, 300)
+        for bI = 0 to vhLN - 1
             y1 = vhLP ? nz(pHST, high) + pHSTv * pCHR * vhVO : nz(pLST, low) - pLSTv * pCHR * vhVO
             y2 = y1 * (1 + (vhLP ? 1 : -1) * nzV[bI] / math.max(vHST, 0.0001) * pCHR / vhHT)
             
