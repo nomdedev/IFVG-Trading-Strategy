@@ -141,9 +141,15 @@ var array<line> VH_lines = array.new_line(0)
 
 // Función para actualizar línea existente
 f_updateLine(_line, _x1, _y1, _x2, _y2, _color) =>
-    line.set_xy1(_line, _x1, _y1)
-    line.set_xy2(_line, _x2, _y2)
+    line.set_xy1(_line, int(_x1), _y1)
+    line.set_xy2(_line, int(_x2), _y2)
     line.set_color(_line, _color)
+
+// Función para ocultar línea
+f_hideLine(_line) =>
+    line.set_xy1(_line, 0, 0.0)
+    line.set_xy2(_line, 0, 0.0)
+    line.set_color(_line, color.new(color.white, 100))
 
 f_gTS(_t) =>
     switch _t
@@ -392,14 +398,14 @@ if mod_vp
         if show_poc
             f_updateLine(pocLine, VP_sI, poc, last_bar_index, poc, pocC)
         else
-            f_updateLine(pocLine, na, na, na, na, color.new(color.white, 100))
+            f_hideLine(pocLine)
         
         if show_vah_val
             f_updateLine(vahLine, VP_sI, vaH, lineX2_vah, vaH, vahC)
             f_updateLine(valLine, VP_sI, vaL, lineX2_vah, vaL, vahC)
         else
-            f_updateLine(vahLine, na, na, na, na, color.new(color.white, 100))
-            f_updateLine(valLine, na, na, na, na, color.new(color.white, 100))
+            f_hideLine(vahLine)
+            f_hideLine(valLine)
         
         // Dibujar barras del perfil
         for i = 0 to vpNR - 1
@@ -419,9 +425,9 @@ if mod_vp
 
 // Ocultar líneas VP si módulo desactivado
 if not mod_vp and barstate.islast
-    f_updateLine(pocLine, na, na, na, na, color.new(color.white, 100))
-    f_updateLine(vahLine, na, na, na, na, color.new(color.white, 100))
-    f_updateLine(valLine, na, na, na, na, color.new(color.white, 100))
+    f_hideLine(pocLine)
+    f_hideLine(vahLine)
+    f_hideLine(valLine)
 
 //═════════════════════════════════════════════════════════════════════════════
 // 12. MÓDULO EMAs - LÓGICA Y VISUALIZACIÓN
