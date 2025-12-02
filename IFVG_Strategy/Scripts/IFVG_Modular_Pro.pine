@@ -8,12 +8,7 @@ indicator("IFVG Modular Pro", "IFVG Pro ☼☾", overlay=true, max_boxes_count=5
 modGR = "🔧 Selector de Módulos"
 
 modTT = "⚠️ IMPORTANTE: Por razones de rendimiento, solo puede activar MÁXIMO 2 MÓDULOS a la vez.\n\n" +"Si activa más de 2, el sistema desactivará automáticamente los excedentes.\n\n" +
-        "Módulos disponibles:\n" +
-        "• IFVG: Detecta Inversion Fair Value Gaps\n" +
-        "• Liquidación: Señales de liquidación con Z-Score\n" +
-        "• Volume Profile: Perfil de volumen por precio\n" +
-        "• EMAs: Medias móviles exponenciales\n" +
-        "• Vol Histogram: Histograma de volumen"
+        "Módulos disponibles:\n" +"• IFVG: Detecta Inversion Fair Value Gaps\n" +"• Liquidación: Señales de liquidación con Z-Score\n" +"• Volume Profile: Perfil de volumen por precio\n" +"• EMAs: Medias móviles exponenciales\n" +"• Vol Histogram: Histograma de volumen"
 
 // Inputs de módulos
 mod_ifvg_input = input.bool(true, "📊 Módulo IFVG", group=modGR, tooltip="Detecta Inversion Fair Value Gaps (zonas donde el precio invierte tras llenar un gap). Muestra cajas verdes (alcistas) y rojas (bajistas) en el gráfico.")
@@ -38,31 +33,31 @@ int slot1 = 0
 int slot2 = 0
 
 if mod_ifvg_input
-    slot1 = 1
+    slot1 := 1
 
 if mod_vp_input
     if slot1 == 0
-        slot1 = 2
+        slot1 := 2
     else if slot2 == 0
-        slot2 = 2
+        slot2 := 2
 
 if mod_ema_input
     if slot1 == 0
-        slot1 = 3
+        slot1 := 3
     else if slot2 == 0
-        slot2 = 3
+        slot2 := 3
 
 if mod_liq_input
     if slot1 == 0
-        slot1 = 4
+        slot1 := 4
     else if slot2 == 0
-        slot2 = 4
+        slot2 := 4
 
 if mod_vhist_input
     if slot1 == 0
-        slot1 = 5
+        slot1 := 5
     else if slot2 == 0
-        slot2 = 5
+        slot2 := 5
 
 // Estados finales de módulos
 mod_ifvg := slot1 == 1 or slot2 == 1
