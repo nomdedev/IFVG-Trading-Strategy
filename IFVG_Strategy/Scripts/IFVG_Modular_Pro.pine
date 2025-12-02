@@ -108,12 +108,21 @@ var array<float> vD_vt = array.new_float(vpNR, 0.0)
 var array<float> vD_vb = array.new_float(vpNR, 0.0)
 var array<box> VP_boxes = array.new_box(0)
 
+// Líneas persistentes para POC y VAH/VAL (crear una vez)
+var line pocLine = line.new(na, na, na, na, color=pocC, width=2)
+var line vahLine = line.new(na, na, na, na, color=vahC, width=1) 
+var line valLine = line.new(na, na, na, na, color=vahC, width=1)
+
 var int VP_sI = 0
 var int VP_pcL = 0
 var int VP_laP = 0
 var int VP_lbP = 0
 var float pHST = na
 var float pLST = na
+
+// Detectar cambio de rango visible (para actualizar cuando se mueve el gráfico)
+if time == chart.left_visible_bar_time
+    VP_sI := bar_index
 
 // Arrays para IFVG (solo si activo)
 var array<float> fvg_top = array.new_float(0)
@@ -129,6 +138,12 @@ var array<line> VH_lines = array.new_line(0)
 //═════════════════════════════════════════════════════════════════════════════
 // 8. FUNCIONES AUXILIARES
 //═════════════════════════════════════════════════════════════════════════════
+
+// Función para actualizar línea existente
+f_updateLine(_line, _x1, _y1, _x2, _y2, _color) =>
+    line.set_xy1(_line, _x1, _y1)
+    line.set_xy2(_line, _x2, _y2)
+    line.set_color(_line, _color)
 
 f_gTS(_t) =>
     switch _t
@@ -371,14 +386,20 @@ if mod_vp
         if maxVt <= 0
             maxVt := 1.0
         
-        // Dibujar líneas POC y VAH/VAL
+        // Dibujar líneas POC y VAH/VAL (actualizar coordenadas)
+        lineX2_vah = int((pLN * vpWD + vpHO)) + last_bar_index
+        
         if show_poc
-            line.new(x1=VP_sI, y1=poc, x2=last_bar_index, y2=poc, color=pocC, style=line.style_solid, width=2)
+            f_updateLine(pocLine, VP_sI, poc, last_bar_index, poc, pocC)
+        else
+            f_updateLine(pocLine, na, na, na, na, color.new(color.white, 100))
         
         if show_vah_val
-            lineX2 = int((pLN * vpWD + vpHO)) + last_bar_index
-            line.new(x1=VP_sI, y1=vaH, x2=lineX2, y2=vaH, color=vahC, style=line.style_solid, width=1)
-            line.new(x1=VP_sI, y1=vaL, x2=lineX2, y2=vaL, color=vahC, style=line.style_solid, width=1)
+            f_updateLine(vahLine, VP_sI, vaH, lineX2_vah, vaH, vahC)
+            f_updateLine(valLine, VP_sI, vaL, lineX2_vah, vaL, vahC)
+        else
+            f_updateLine(vahLine, na, na, na, na, color.new(color.white, 100))
+            f_updateLine(valLine, na, na, na, na, color.new(color.white, 100))
         
         // Dibujar barras del perfil
         for i = 0 to vpNR - 1
@@ -395,6 +416,12 @@ if mod_vp
                 sBI2 = sBI
                 eBI2 = sBI - int((vt_i - vb_i) / maxVt * pLN * vpWD)
                 array.push(VP_boxes, box.new(sBI2, nz(pLST, low) + (i + 0.1) * pSTP, eBI2, nz(pLST, low) + (i + 0.9) * pSTP, color(na), bgcolor=vpDC))
+
+// Ocultar líneas VP si módulo desactivado
+if not mod_vp and barstate.islast
+    f_updateLine(pocLine, na, na, na, na, color.new(color.white, 100))
+    f_updateLine(vahLine, na, na, na, na, color.new(color.white, 100))
+    f_updateLine(valLine, na, na, na, na, color.new(color.white, 100))
 
 //═════════════════════════════════════════════════════════════════════════════
 // 12. MÓDULO EMAs - LÓGICA Y VISUALIZACIÓN
